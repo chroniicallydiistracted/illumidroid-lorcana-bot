@@ -1,0 +1,4 @@
+WASM_RUN_OK
+same_seed_identical=true
+diff_seed_differs=true
+deck_seedA=card-21,card-1,card-29,card-15,card-7,card-18,card-8,card-3,card-16,card-22,card-20,card-9,card-25,card-2,card-10,card-6,card-5,card-24,card-4,card-11,card-27,card-13,card-19
