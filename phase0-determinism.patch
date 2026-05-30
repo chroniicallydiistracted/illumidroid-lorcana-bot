@@ -1,0 +1,78 @@
+diff --git a/packages/lorcana/lorcana-engine/src/core/runtime/zone-operations.ts b/packages/lorcana/lorcana-engine/src/core/runtime/zone-operations.ts
+index 4c2ee84..6403a1d 100644
+--- a/packages/lorcana/lorcana-engine/src/core/runtime/zone-operations.ts
++++ b/packages/lorcana/lorcana-engine/src/core/runtime/zone-operations.ts
+@@ -7,6 +7,16 @@ import type { ZoneRegistry } from "./zone-registry";
+ import { resolveZoneIdFromRegistry } from "./zone-registry";
+ import type { UndoBarrierReason } from "./match-runtime.types";
+ import { invalidateStaticEffects } from "../../runtime-moves/rules/static-effects-invalidation";
++import { createRandomAPIForDraft } from "./match-runtime.random-apis";
++import seedrandom from "seedrandom";
++
++// Phase 0 determinism: a fixed-seed deterministic stream replaces the former
++// `Math.random` fallback. Production paths always wire the per-match seeded
++// RandomAPI (match-runtime.utils.ts, performMulligan); an unwired caller is a
++// bug, but it is now at least reproducible rather than host-nondeterministic.
++const DETERMINISTIC_FALLBACK_RANDOM: () => number = seedrandom(
++  "tcg-zone-ops-unseeded-fallback",
++);
+ 
+ // =============================================================================
+ // Zone Operations API
+@@ -94,7 +104,7 @@ export function createZoneOperations(
+ ): ZoneOperationsAPI {
+   const zones = draft.ctx.zones;
+   const defaultCause: EventCause = { kind: "SYSTEM", source: "ZONE_OPERATION" };
+-  const random = options?.random ?? Math.random;
++  const random = options?.random ?? DETERMINISTIC_FALLBACK_RANDOM;
+   const markUndoBarrier = options?.onUndoBarrier;
+   const onCardEnteredZone = options?.onCardEnteredZone;
+ 
+@@ -707,8 +717,11 @@ export function performMulligan(
+ 
+   // Move hand to bottom of deck
+   onUndoBarrier?.("mulligan");
++  // Phase 0 determinism: wire the seeded RandomAPI so the mulligan shuffle is
++  // reproducible from ctx.random.seed (was previously host-nondeterministic).
+   const ops = createZoneOperations(draft, zoneRegistry, emitEvent, {
+     onUndoBarrier,
++    random: createRandomAPIForDraft(draft).random,
+   });
+   for (const cardId of playerHandCards) {
+     ops.moveCard(cardId, { zone: deckZoneId, playerId }, { index: 0 });
+diff --git a/packages/lorcana/lorcana-engine/src/runtime-moves/resolution/action-effects/move-cards-from-under-effect.ts b/packages/lorcana/lorcana-engine/src/runtime-moves/resolution/action-effects/move-cards-from-under-effect.ts
+index 5838dc6..34f1b77 100644
+--- a/packages/lorcana/lorcana-engine/src/runtime-moves/resolution/action-effects/move-cards-from-under-effect.ts
++++ b/packages/lorcana/lorcana-engine/src/runtime-moves/resolution/action-effects/move-cards-from-under-effect.ts
+@@ -18,16 +18,10 @@ export function isMoveCardsFromUnderEffect(effect: unknown): effect is MoveCards
+   );
+ }
+ 
+-function shuffleCards<T>(cards: T[]): T[] {
+-  const shuffled = [...cards];
+-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+-    const swapIndex = Math.floor(Math.random() * (index + 1));
+-    const current = shuffled[index]!;
+-    shuffled[index] = shuffled[swapIndex]!;
+-    shuffled[swapIndex] = current;
+-  }
+-  return shuffled;
+-}
++// NOTE: deck-bottom-random ordering is produced via the seeded RandomAPI
++// (ctx.framework.random.shuffle) so it is reproducible across determinizations
++// and replays. A previous local Math.random()-based shuffle was removed
++// (Phase 0 determinism patch).
+ 
+ function removeUnderCardFromParent(
+   ctx: PlayCardExecutionContext,
+@@ -171,7 +165,9 @@ export function resolveMoveCardsFromUnderEffect(
+   const sourceCardIds = resolveSourceCardIds(ctx, cardPlayed, effect, resolutionInput);
+   const uniqueSourceCardIds = [...new Set(sourceCardIds)];
+   const cardsToMove =
+-    destination === "deck-bottom-random" ? shuffleCards(uniqueSourceCardIds) : uniqueSourceCardIds;
++    destination === "deck-bottom-random"
++      ? ctx.framework.random.shuffle([...uniqueSourceCardIds])
++      : uniqueSourceCardIds;
+ 
+   // For "under-chosen" destination, resolve the target from resolution input
+   let underTargetId: CardInstanceId | undefined;

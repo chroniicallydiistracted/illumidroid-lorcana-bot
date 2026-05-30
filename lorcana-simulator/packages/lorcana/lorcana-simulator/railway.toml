@@ -1,0 +1,34 @@
+# Railway configuration for the Lorcana simulator (SvelteKit via adapter-node).
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "packages/lorcana/lorcana-simulator/Dockerfile"
+watchPatterns = [
+  "packages/lorcana/lorcana-simulator/**",
+  "package.json",
+  "bun.lock",
+  "turbo.json",
+  "tsconfig.json",
+  "packages/**",
+]
+
+[deploy]
+#healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+numReplicas = 1
+
+[deploy.teardown]
+overlapSeconds = 60
+drainingSeconds = 60
+
+[environments.production.deploy]
+numReplicas = 2
+restartPolicyMaxRetries = 5
+
+[environments.staging.deploy]
+numReplicas = 1
+
+[environments.pr.deploy]
+numReplicas = 1
