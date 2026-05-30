@@ -10,7 +10,22 @@ Full architecture design: `lorcana-simulator/lorcana-bot-architecture.md`
 
 ---
 
-## Current state: Phase 0 COMPLETE
+## Current state: Phase 1 COMPLETE (Phase 0 also complete)
+
+Phase 1 (plain neural-ISMCTS, end-to-end self-play loop) is done. The Python ML
+stack lives in `lorcana-bot/` and drives the real Lorcanito kernel:
+- **1A bridge** — Bun subprocess hosts the kernel; `LorcanaEnv` gym wrapper;
+  engine-authoritative legal-action mask; snapshot/restore for tree search.
+- **1B network** — `LorcanaNet`: set-transformer trunk + factored pointer policy
+  head + distributional (C51) value head. (Belief head deferred to Phase 2.)
+- **1C search** — `BISMCTS`: PUCT, progressive widening, depth-limited neural
+  leaves, zero-sum perspective backup. Determinization N=1 (realized world);
+  belief-weighted multi-determinization seam left for Phase 2.
+- **1D training** — behaviour cloning from the scripted oracle (BC loss
+  2.55→0.49) + AlphaZero-style self-play actor/learner loop.
+
+14/14 tests pass (`pytest lorcana-bot/tests`). Full write-up:
+`lorcana-simulator/phase1/PHASE1-COMPLETION-REPORT.md`.
 
 Phase 0 exit criteria — all met:
 
@@ -91,8 +106,8 @@ packages/lorcana/lorcana-engine/src/
 The four operations the search needs — confirmed present and working:
 
 ```typescript
-// 1. Initialize
-createLorcanaServerGame(deckA, deckB, { seed, ... }) → MatchState
+// 1. Initialize  (real signature — decks + seed live inside `init`, NOT positional)
+createLorcanaServerGame(playersInfo: { player: Player }[], init: LorcanaEngineInit) → LorcanaServer
 
 // 2. Transition (the reducer) — returns Mutative patches, not a full clone
 executeCommand(state, command) → { state', patches: Patch[] }
@@ -202,14 +217,30 @@ wasmtime kernel-final.wasm
 # Expect: WASM_RUN_OK / same_seed_identical=true / diff_seed_differs=true
 ```
 
+### Phase 1 ML stack (from repo root; venv at `lorcana-bot-venv/`)
+
+```bash
+# tests (network is fast; bridge/search spawn the Bun engine)
+lorcana-bot-venv/bin/python -m pytest lorcana-bot/tests        # 14 pass
+# behaviour-clone the scripted oracle, then self-play from that prior
+cd lorcana-bot
+../lorcana-bot-venv/bin/python -m training.bootstrap --games 20 --epochs 5 --out checkpoints/bc.pt
+../lorcana-bot-venv/bin/python -m training.selfplay  --init checkpoints/bc.pt --iterations 3 --games 4 --sims 32
+```
+The Bun engine server resolves the workspace via relative imports into
+`lorcana-simulator/packages/...`; `bridge.py` runs it with cwd = `lorcana-simulator/`.
+
 ---
 
-## Next: Phase 1 — Plain neural-ISMCTS (no belief net yet)
+## Phase 1 — Plain neural-ISMCTS (DONE)
 
-Goal: a working end-to-end self-play loop that can play full games and
+Goal (met): a working end-to-end self-play loop that can play full games and
 generate training data. No league, no belief net — just the basic loop.
+Implemented in `lorcana-bot/`; see the completion report and the README there.
+**Next is Phase 2** (belief net + importance-weighted determinization + Bayesian
+filtering — the strength inflection point; see architecture doc §2.4/§3.2).
 
-### Phase 1 sub-steps (in order — each gates the next):
+### Phase 1 sub-steps (all complete — each gated the next):
 
 ```
 1A  Bridge       Full kernel callable from Python:

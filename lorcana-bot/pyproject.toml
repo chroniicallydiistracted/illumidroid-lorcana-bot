@@ -1,0 +1,18 @@
+[project]
+name = "lorcana-bot"
+version = "0.1.0"
+description = "Champion-level Lorcana TCG agent (B-ISMCTS + AlphaZero-style net) over the Lorcanito engine"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.2", "numpy>=1.26"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# Bridge/search tests spawn the Bun engine and can run a few minutes each.
+markers = []
+
+[tool.setuptools]
+packages = ["engine", "network", "search", "training"]

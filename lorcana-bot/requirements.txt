@@ -1,0 +1,5 @@
+# Phase 1 ML stack. torch is CPU-only here; install the CUDA build for GPU.
+# (CPU install used in dev: pip install torch --index-url https://download.pytorch.org/whl/cpu)
+torch>=2.2
+numpy>=1.26
+pytest>=8.0
