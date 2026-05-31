@@ -1,0 +1,548 @@
+{
+    "summary": {
+        "pack": "final_lorcanito_tournament_decks",
+        "deck_count": 25,
+        "retained_from_v2_zip": 17,
+        "manual_user_fetched_decks_added": 8,
+        "all_decks_top5_or_better_by_recorded_rank": true,
+        "all_have_60_or_more_cards": true,
+        "parse_error_count": 0,
+        "banned_card_screen": [
+            "Hiram Flaversham",
+            "Fortisphere"
+        ],
+        "banned_card_hit_count": 0,
+        "format": "{ \"name\": string, \"cards\": \"N Card - Version\\n...\" }",
+        "source_inputs": [
+            "failed-decks-manual-fetch-plain-text(1).md",
+            "champion_bismcts_tournament_gauntlet_v2(1).zip"
+        ]
+    },
+    "decks": [
+        {
+            "file": "decks/01_cloudy_ae_aggro.json",
+            "name": "Cloudy AE Aggro",
+            "event": "The Enchanted Citrus Clash 3K Core Constructed",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "",
+            "date": "2026-05-24",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-tournaments/the-enchanted-citrus-clash-3k-core-constructed-tournament-decks-364040",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/02_this_isnt_blurple_es_control.json",
+            "name": "This Isnt Blurple ES Control",
+            "event": "The Enchanted Citrus Clash 3K Core Constructed",
+            "placement": "2nd",
+            "rank_num": 2,
+            "player": "",
+            "date": "2026-05-24",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-tournaments/the-enchanted-citrus-clash-3k-core-constructed-tournament-decks-364040",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/03_aa_ap_evasives.json",
+            "name": "AA AP Evasives",
+            "event": "The Enchanted Citrus Clash 3K Core Constructed",
+            "placement": "5th",
+            "rank_num": 5,
+            "player": "",
+            "date": "2026-05-24",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-tournaments/the-enchanted-citrus-clash-3k-core-constructed-tournament-decks-364040",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/04_ward_es_control.json",
+            "name": "Ward ES Control",
+            "event": "Spring League 2026 - Roma",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "",
+            "date": "2026-05-23",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-tournaments/spring-league-2026-roma-tournament-decks-364035",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/05_roma_aa_evasives.json",
+            "name": "Roma AA Evasives",
+            "event": "Spring League 2026 - Roma",
+            "placement": "4th",
+            "rank_num": 4,
+            "player": "",
+            "date": "2026-05-23",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-amber-amethyst-514782",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/06_chnord_ae_aggro.json",
+            "name": "Chnord AE Aggro",
+            "event": "Chnordcana Day's 2",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "",
+            "date": "2026-05-24",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-amber-emerald-515108",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/07_chnord_ambre_amethyste.json",
+            "name": "Chnord Ambre Amethyste",
+            "event": "Chnordcana Day's 2",
+            "placement": "2nd",
+            "rank_num": 2,
+            "player": "",
+            "date": "2026-05-24",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-ambre-amethyste-515107",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/08_chnord_beerple.json",
+            "name": "Chnord Beerple",
+            "event": "Chnordcana Day's 2",
+            "placement": "4th",
+            "rank_num": 4,
+            "player": "",
+            "date": "2026-05-24",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-beerple-515106",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/09_mega_violet_vert.json",
+            "name": "Mega Violet Vert",
+            "event": "Mega Mulligan Challenge de Noël",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "",
+            "date": "2025-12-15",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-violet-vert-508860",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/10_mega_vixcious.json",
+            "name": "Mega Vixcious",
+            "event": "Mega Mulligan Challenge de Noël",
+            "placement": "3rd",
+            "rank_num": 3,
+            "player": "",
+            "date": "2025-12-15",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-vixcious-508858",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/11_conflux_blurple_maison.json",
+            "name": "Conflux Blurple Maison",
+            "event": "Conflux Ink Clash - Wilds Unknown",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "",
+            "date": "2026-05-16",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-blurple-maison-512181",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/12_conflux_fairy_tale.json",
+            "name": "Conflux Fairy Tale",
+            "event": "Conflux Ink Clash - Wilds Unknown",
+            "placement": "2nd",
+            "rank_num": 2,
+            "player": "",
+            "date": "2026-05-16",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-fairy-tale-512182",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/13_conflux_pimp_my_ride.json",
+            "name": "Conflux Pimp My Ride",
+            "event": "Conflux Ink Clash - Wilds Unknown",
+            "placement": "3rd",
+            "rank_num": 3,
+            "player": "",
+            "date": "2026-05-16",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-pimp-my-ride-512180",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 61,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/14_conflux_elastique_incroyable.json",
+            "name": "Conflux Elastique Incroyable",
+            "event": "Conflux Ink Clash - Wilds Unknown",
+            "placement": "4th",
+            "rank_num": 4,
+            "player": "",
+            "date": "2026-05-16",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-elastique-incroyable-512183",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/15_conflux_toys_r_us.json",
+            "name": "Conflux Toys R Us",
+            "event": "Conflux Ink Clash - Wilds Unknown",
+            "placement": "5th",
+            "rank_num": 5,
+            "player": "",
+            "date": "2026-05-16",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-toys-r-us-512188",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/16_loreleague_i_hate_dogs.json",
+            "name": "LoreLeague I Hate Dogs",
+            "event": "LoreLeague Invitational - Imola Qualifier",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "",
+            "date": "2026-04-11",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-i-hate-dogs-509383",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/17_loreleague_ciao_maui.json",
+            "name": "LoreLeague Ciao Maui",
+            "event": "LoreLeague Invitational - Imola Qualifier",
+            "placement": "2nd",
+            "rank_num": 2,
+            "player": "",
+            "date": "2026-04-11",
+            "source_type": "retained_from_v2_zip",
+            "source": "https://inkdecks.com/lorcana-metagame/deck-ciao-maui-509384",
+            "notes": "Retained from previous v2 zip.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/18_yurple.json",
+            "name": "Yurple",
+            "event": "Enchanted Citrus Clash 3K Core Constructed",
+            "placement": "4th",
+            "rank_num": 4,
+            "player": "WYLD Zurita",
+            "date": "05-24-2026",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/19_blurple.json",
+            "name": "Blurple",
+            "event": "Spring League 2026, Roma by Lore League",
+            "placement": "2nd",
+            "rank_num": 2,
+            "player": "Emanuele Strano",
+            "date": "05-23-2026",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 62,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/20_kingclownpowie_tribe.json",
+            "name": "KingClownPowie&Tribe",
+            "event": "Spring League 2026, Roma by Lore League",
+            "placement": "4th",
+            "rank_num": 4,
+            "player": "Boncompagni Francesco",
+            "date": "05-23-2026",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/21_pioche_violette.json",
+            "name": "Pioche Violette",
+            "event": "Chnordcana Day's 2 by Lille Aux Jouets",
+            "placement": "4th",
+            "rank_num": 4,
+            "player": "ESTA_Dreaddy_974",
+            "date": "05-24-2026",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/22_winn_t_er.json",
+            "name": "Winn(t)er",
+            "event": "Mega Mulligan Challenge de Noël by MulliganTV",
+            "placement": "2nd",
+            "rank_num": 2,
+            "player": "FinallyMario",
+            "date": "2025-12-15",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/23_qu_on_lui_coupe_la_tete.json",
+            "name": "Qu'on lui coupe la tete",
+            "event": "Mega Mulligan Challenge de Noël by MulliganTV",
+            "placement": "4th",
+            "rank_num": 4,
+            "player": "[TSI] Midazo",
+            "date": "2025-12-15",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/24_eme_sap.json",
+            "name": "EME SAP",
+            "event": "Core Constructed, Tweede Pinksterdag @ GameForce",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "Lucky_Gecko_4968",
+            "date": "05-25-2026",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        },
+        {
+            "file": "decks/25_pyrouette_cacahuete.json",
+            "name": "PYRouette Cacahuète",
+            "event": "Win une Enchantée, Les K’artonnés x Shifumi",
+            "placement": "1st",
+            "rank_num": 1,
+            "player": "[PYR] DNL",
+            "date": "05-23-2026",
+            "source_type": "manual_user_fetched_tournament_deck",
+            "source": "failed-decks-manual-fetch-plain-text(1).md",
+            "notes": "Provided by user in failed/new deck markdown.",
+            "card_count": 60,
+            "line_parse_errors": [
+            ],
+            "banned_card_hits": [
+            ],
+            "copies_over_4": [
+            ],
+            "lorcanito_json_shape": true,
+            "passed_basic_audit": true
+        }
+    ]
+}

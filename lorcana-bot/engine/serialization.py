@@ -166,6 +166,57 @@ def encode_obs(obs: dict) -> dict[str, np.ndarray]:
     }
 
 
+def encode_belief(obs: dict) -> dict[str, np.ndarray]:
+    """Belief target/conditioning from the opponent's true hidden zones.
+
+    Candidate pool = the opponent's hidden cards (hand + deck), i.e. the known
+    composition in self-play (deck-conditioning, architecture doc §6). For each
+    candidate we emit its identity-vocab id and a binary label `in_hand`. The
+    belief head scores each candidate against the (leak-free) trunk; these arrays
+    NEVER enter the trunk, so policy/value cannot see opponent identities.
+    """
+    hidden = obs.get("hidden") or {}
+    hand = hidden.get("hand", []) or []
+    deck = hidden.get("deck", []) or []
+    pool = [(c, 1.0) for c in hand] + [(c, 0.0) for c in deck]
+    p = len(pool)
+    bel_ids = np.zeros(p, dtype=np.int64)
+    bel_label = np.zeros(p, dtype=np.float32)
+    for i, (c, lab) in enumerate(pool):
+        bel_ids[i] = vocab_id(c.get("def"), hidden=False)  # identity is known (conditioning)
+        bel_label[i] = lab
+    return {
+        "belief_ids": bel_ids,                  # [P]
+        "belief_label": bel_label,              # [P] (1 = currently in opp hand)
+        "belief_handcount": np.int64(int(bel_label.sum())),
+        "n_pool": np.int64(p),
+    }
+
+
+def collate_belief(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+    """Pad a list of encoded belief targets into a batch with a candidate mask."""
+    B = len(batch)
+    max_p = max((int(b["n_pool"]) for b in batch), default=1)
+    max_p = max(max_p, 1)
+    bel_ids = np.zeros((B, max_p), dtype=np.int64)
+    bel_label = np.zeros((B, max_p), dtype=np.float32)
+    bel_mask = np.zeros((B, max_p), dtype=bool)
+    handcount = np.zeros(B, dtype=np.float32)
+    for i, b in enumerate(batch):
+        p = int(b["n_pool"])
+        if p:
+            bel_ids[i, :p] = b["belief_ids"]
+            bel_label[i, :p] = b["belief_label"]
+            bel_mask[i, :p] = True
+        handcount[i] = float(b["belief_handcount"])
+    return {
+        "belief_ids": bel_ids,
+        "belief_label": bel_label,
+        "belief_mask": bel_mask,
+        "belief_handcount": handcount,
+    }
+
+
 def collate(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     """Pad a list of encoded observations into a batch with masks."""
     B = len(batch)

@@ -10,7 +10,66 @@ Full architecture design: `lorcana-simulator/lorcana-bot-architecture.md`
 
 ---
 
-## Current state: Phase 1 COMPLETE (Phase 0 also complete)
+## Current state: Phase 3 COMPLETE (Phases 0–2 also complete)
+
+Phase 3 (League/PSRO self-play + exploitability gating — "becomes hard to beat")
+is done, in `lorcana-bot/training/`:
+- **League** (`league.py`) — population of players: trainable `main`, frozen
+  `past_k` mains, scripted `anchor`s (`best`/`deckAware`), exploiters. `Player`
+  interface advances one decision; `NetPlayer` acts via B-ISMCTS, `ScriptedPlayer`
+  via the shipped automation.
+- **PFSP** opponent sampling (`mode="hard"` weights ∝ `1−P(win)`) + **Elo** +
+  pairwise results matrix.
+- **Match routing** (`match.py`) — `play_match` runs two (possibly different)
+  policies through one real-deck game, routing each decision to the seat to move,
+  collecting each learning seat's samples with z from its POV.
+- **Anti-collapse** — KL trust-region term (`learner.py` `c_kl`/`set_reference`)
+  + entropy bonus + Phase-2 deck-diversity sampling.
+- **Exploitability + gauntlet** (`exploitability.py`) — gauntlet win-rate vs
+  anchors/checkpoints (gating signal) + a main-exploiter exploitability proxy.
+- **Orchestrator** (`league_train.py`) — generate → train → freeze → gate.
+
+Run: `python -m training.league_train --init checkpoints/bc_realdecks.pt
+--iterations N --games G --sims S [--exploit]`. Tests: `test_league.py` (PFSP,
+Elo, KL, match routing + engine smoke). Report:
+`lorcana-simulator/phase3/PHASE3-COMPLETION-REPORT.md`.
+**Next is Phase 4** (ReBeL/PBS subgame solving + distributional/auxiliary value
+heads; §5.4/§3.2). The §2.3 public-history encoder to sharpen the belief is the
+other high-value enrichment.
+
+---
+
+Phase 2 (belief net + importance-weighted determinization + Bayesian filtering —
+the strength inflection point) is done, in `lorcana-bot/`:
+- **Belief net** — a third, leak-free head (`network/heads.py:BeliefHead`) that
+  predicts `P(card ∈ opp hand)` over the opponent's known pool, count-consistent
+  to the public hand size. The trunk is built only from the filtered view, so
+  policy/value cannot see opponent identities (proven by a leak-free test).
+  Trained on the true hidden world (free in self-play; bridge `hidden` block).
+- **Importance-weighted determinization** — `bridge.determinize()` repartitions
+  the opponent's hidden cards via state surgery; `search/determinize.py` samples
+  N worlds from the belief with weights `ρ_i = b/q`; `BISMCTS.run_belief` pools
+  per-world Phase-1 searches at the shared root (legal set is world-invariant,
+  since determinization only touches hidden cards).
+- **Bayesian filtering** — `search/belief_filter.py`: SIR particle filter
+  (neural belief = proposal, observed action = correction, ESS-triggered resample).
+
+Tests: 27/27 pass. Report: `lorcana-simulator/phase2/PHASE2-COMPLETION-REPORT.md`,
+plan: `lorcana-simulator/phase2/PHASE2-PLAN.md`.
+**Next is Phase 3** (League/PSRO self-play + exploitability gating).
+
+**Real decks (done):** 25 real tournament-winning decklists live in
+`lorcana-bot/decks/*.json` (fixture shape `{name, cards}`; provenance in
+`lorcana-bot/decks/docs/`). The bridge resolves them against the full card
+catalog (`all001..all012Cards` + `resolveLorcanaDeckListTextFromPool`) and uses
+them by default; `reset(seed, deck_p1, deck_p2)` selects a pair (deterministic
+from the seed if unspecified), `list_decks` enumerates them, and
+bootstrap/self-play sample distinct pairs for metagame diversity (§6). All 25
+resolve to full decks with 0 unresolved cards. Pass `deck_p1="placeholder"` to
+force the old synthetic fallback. This makes the belief/determinization
+strategically meaningful (real shared card identities across games).
+
+---
 
 Phase 1 (plain neural-ISMCTS, end-to-end self-play loop) is done. The Python ML
 stack lives in `lorcana-bot/` and drives the real Lorcanito kernel:
@@ -153,6 +212,66 @@ saveSnapshot() / getSnapshotAtStateID(stateID) → RuntimeSnapshot
 
 ---
 
+## Throughput / hardware (training infra)
+
+Dev box: RTX 3070 Ti (8 GB, reachable from WSL2 via `/dev/dxg`), i5-12600K
+(16 logical cores), 32 GB. **torch is the CUDA build** (`2.6.0+cu124`,
+`torch.cuda.is_available()==True`) — reinstall with
+`pip install torch --index-url https://download.pytorch.org/whl/cu124` if the venv
+is rebuilt.
+
+**The bottleneck is engine COMPUTE, not IPC and not inference** (measured: native
+in-Bun engine ~12–24 decisions/s; a net forward is ~1 ms). The GPU accelerates
+the **learner**, not the actors.
+
+**Option 1 (DONE) — in-process search.** The MCTS no longer drives the engine one
+step per IPC round-trip. Two changes:
+- **O(1) snapshot/restore.** Engine state is immutable (Mutative structural
+  sharing), so `snapshot` just holds the `getAuthoritativeState()` reference and
+  `restore` does `loadState(shallowProtect(ref))` (shallow-copy top+G+ctx so
+  `invalidateStaticEffects` can't corrupt the canonical snapshot). The old
+  `structuredClone` (~2.7 ms/op) is gone.
+- **`run_paths` op + path-based descent** (`server.ts` + `search/ismcts.py`): the
+  Python MCTS tree-walks the in-memory tree (no engine) to find the descent path,
+  then ONE `run_paths` IPC executes the whole path in-process and returns the
+  leaf obs. Sims that re-hit terminal/depth nodes touch the engine zero times.
+  Replaces O(sims×depth) per-step round-trips with O(new-leaves) batched ones.
+
+Measured after Option 1: **~24–25 sims/s plain, ~39 sims/s belief** (≈0.75–0.81
+decisions/s/actor) — ~5–8× the old per-step search; the engine is now the
+in-process limiter. With the parallel actor pool (`training/distributed.py`,
+~3× at ~8 actors) that's the practical training rate.
+
+```bash
+python -m training.distributed --init lorcana-bot/checkpoints/bc_fair.pt \
+  --rounds R --actors 8 --games-per-actor 1 --sims 8 --n-worlds 4   # [--no-belief]
+```
+
+Next levers (not yet done): **leaf-batching with virtual loss** → batch many
+sims' leaves into one `run_paths` IPC + one GPU net batch (only then does the GPU
+get fed; the search already takes a pluggable evaluator). **Rust engine port** is
+the ceiling-raiser but a 92k-LOC / 205-suite trap — deferred indefinitely.
+
+Clean prior checkpoint: `bc_fair.pt` (fair data). Pre-fairness-fix checkpoints
+were deleted as oracle-tainted.
+
+## Information-policy fairness (training-data hygiene — important)
+
+The engine's automation planner **defaults an unset `informationPolicy` to
+`"oracle"`** (`planner.ts:3088`), and oracle = full-deck visibility into the
+opponent's hidden cards. Only `bestDeckAwareLoreRaceAutomatedActionStrategy` is
+explicitly fair; the oracle and all composer strategies cheat. **Oracle play
+must never generate training targets** (BC would clone unseeable decisions; value
+z would be off-distribution). Observation features are safe either way (obs is
+always the fog-filtered `getBoard(view)`), but targets are not.
+
+The bridge is **fair-by-default**: `best`/`fairBest`/`fairDefault`/`fairControl`/
+`fairAggro`/`deckAware` are all fair (a `fair()` wrapper forces it); `oracle`/
+`oracleDeckAware` are EVAL-ONLY. `step_auto` returns `policy` ("fair"|"oracle");
+`bootstrap.generate_game` raises on oracle; league anchors are fair. Checkpoints
+made before this fix are oracle-tainted at the target level — retrain on fair
+data.
+
 ## Architecture decisions (do not re-litigate these)
 
 **Core algorithm: B-ISMCTS** (Belief-guided neural Information-Set MCTS)
@@ -220,8 +339,8 @@ wasmtime kernel-final.wasm
 ### Phase 1 ML stack (from repo root; venv at `lorcana-bot-venv/`)
 
 ```bash
-# tests (network is fast; bridge/search spawn the Bun engine)
-lorcana-bot-venv/bin/python -m pytest lorcana-bot/tests        # 14 pass
+# tests (network/belief/determinize are fast; bridge/search spawn the Bun engine)
+lorcana-bot-venv/bin/python -m pytest lorcana-bot/tests        # 27 pass (P1+P2)
 # behaviour-clone the scripted oracle, then self-play from that prior
 cd lorcana-bot
 ../lorcana-bot-venv/bin/python -m training.bootstrap --games 20 --epochs 5 --out checkpoints/bc.pt
@@ -237,8 +356,8 @@ The Bun engine server resolves the workspace via relative imports into
 Goal (met): a working end-to-end self-play loop that can play full games and
 generate training data. No league, no belief net — just the basic loop.
 Implemented in `lorcana-bot/`; see the completion report and the README there.
-**Next is Phase 2** (belief net + importance-weighted determinization + Bayesian
-filtering — the strength inflection point; see architecture doc §2.4/§3.2).
+(Phase 2 — belief net + importance-weighted determinization + Bayesian filtering
+— is now also complete; see the state summary at the top of this file.)
 
 ### Phase 1 sub-steps (all complete — each gated the next):
 

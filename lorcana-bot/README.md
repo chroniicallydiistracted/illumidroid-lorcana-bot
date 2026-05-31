@@ -17,17 +17,20 @@ engine/
   serialization.py        obs -> card-token / global / factored-action tensors
 network/
   trunk.py                set-transformer encoder over card tokens
-  heads.py                factored pointer policy + distributional (C51) value
-  model.py                LorcanaNet (+ numpy infer for the actor)
+  heads.py                factored pointer policy + distributional value + belief (P2)
+  model.py                LorcanaNet 3 heads (+ numpy infer / belief_probs)
 search/
   node.py                 InfoSetNode: PUCT + progressive widening
-  ismcts.py               B-ISMCTS planner (depth-limited, neural leaves)
-  evaluator.py            UniformEvaluator / NetEvaluator
+  ismcts.py               B-ISMCTS planner: run() (P1) + run_belief() (P2)
+  determinize.py          belief-sampled worlds + importance weights (P2)
+  belief_filter.py        SIR particle filter / Bayesian filtering (P2)
+  evaluator.py            Uniform/Net evaluators + BeliefEvaluator (P2)
 training/
-  learner.py              ReplayBuffer + policy/value loss + gradient steps
+  learner.py              ReplayBuffer + policy/value/belief loss + gradient steps
   bootstrap.py            behaviour cloning from the scripted automation
-  selfplay.py             AlphaZero-style self-play actor loop
+  selfplay.py             AlphaZero-style self-play actor loop (belief-guided)
 tests/                    test_bridge / test_network / test_search
+                          + test_belief / test_determinize / test_search_belief (P2)
 ```
 
 ## Setup
@@ -89,12 +92,38 @@ handing the planner a one-shot strategy that orders that candidate first; a
 synthetic `passTurn` action maps to the planner's pass fallback. Legality stays
 authoritative in the engine — the network only scores legal continuations.
 
-## Known Phase-1 scope limits (addressed later)
+## Phase 2 — belief net + importance-weighted determinization + Bayesian filtering
 
-* **Determinization N=1** over the realized world (the engine's true state). The
-  multi-determinization / belief-weighted sampling seam is in `SearchConfig`
-  (`n_determinizations`) and `ismcts._simulate`; Phase 2 fills it in.
+Done. `BISMCTS.run_belief(obs, BeliefEvaluator(net), n_worlds=N)` samples N
+opponent-hand worlds from the (leak-free) belief head, searches each determinized
+world with Phase-1 PUCT, and pools root statistics with importance weights.
+`search/belief_filter.ParticleFilter` sharpens the belief between turns. See
+`../lorcana-simulator/phase2/PHASE2-COMPLETION-REPORT.md`.
+
+## Real decks
+
+25 real tournament-winning decklists live in `decks/*.json` (fixture shape
+`{name, cards}`; provenance under `decks/docs/`). The bridge resolves them
+against the full card catalog and uses them by default:
+
+```python
+eng = LorcanaEngine()
+eng.list_decks()                                   # [{id, name}, ...]  (25)
+eng.reset("seed", deck_p1="01_cloudy_ae_aggro", deck_p2="18_yurple")
+# omit deck ids -> a pair is picked deterministically from the seed
+# deck_p1="placeholder" -> old synthetic fallback
+```
+
+Bootstrap/self-play sample distinct deck pairs per game for metagame diversity.
+This makes the belief net and determinization strategically meaningful (real,
+shared card identities across games).
+
+## Known scope limits (addressed later)
+
 * **Transport** is one JSON round-trip per game step (Option B). The in-process
-  WASM path (Option A) can be promoted behind the same `bridge.py` interface.
-* Single-process actor/learner; the distributed Sebulba split is a later perf
-  task, not a correctness one.
+  WASM path (Option A) is a throughput option (note: QuickJS-WASM is interpreted
+  and ~20–100× slower than the JIT'd Bun subprocess — see the WASM viability
+  research); the real throughput levers are transport-batching + batched
+  inference (Sebulba), promotable behind the same `bridge.py` interface.
+* Single-process actor/learner; the distributed Sebulba split and Phase 3
+  league/PSRO are the next milestones.

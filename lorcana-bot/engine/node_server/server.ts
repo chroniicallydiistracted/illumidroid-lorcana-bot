@@ -28,19 +28,113 @@ import {
   bestDeckAwareOracleLoreRaceAutomatedActionStrategy,
   bestDeckAwareLoreRaceAutomatedActionStrategy,
   deckAwareLoreRaceAutomatedActionStrategy,
+  defaultLoreRaceAutomatedActionStrategy,
+  boardControlLoreRaceAutomatedActionStrategy,
+  aggressiveBoardControlLoreRaceAutomatedActionStrategy,
 } from "../../../lorcana-simulator/packages/lorcana/lorcana-engine/src/automation/index.ts";
 import type {
   AutomatedActionCandidate,
   AutomatedActionStrategy,
   AutomatedActionCandidateSummary,
 } from "../../../lorcana-simulator/packages/lorcana/lorcana-engine/src/automation/index.ts";
+import { readdirSync, readFileSync } from "node:fs";
+import { all001Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/001/index.ts";
+import { all002Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/002/index.ts";
+import { all003Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/003/index.ts";
+import { all004Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/004/index.ts";
+import { all005Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/005/index.ts";
+import { all006Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/006/index.ts";
+import { all007Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/007/index.ts";
+import { all008Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/008/index.ts";
+import { all009Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/009/index.ts";
+import { all010Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/010/index.ts";
+import { all011Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/011/index.ts";
+import { all012Cards } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/cards/012/index.ts";
+import { resolveLorcanaDeckListTextFromPool } from "../../../lorcana-simulator/packages/lorcana/lorcana-cards/src/utils/deck-list-resolver.ts";
 
 type AnyEngine = any;
 
+// --- real tournament decks (resolved against the full card catalog) ----------
+const CARD_POOL = [
+  all001Cards, all002Cards, all003Cards, all004Cards, all005Cards, all006Cards,
+  all007Cards, all008Cards, all009Cards, all010Cards, all011Cards, all012Cards,
+].flat().filter((c: any) => c?.name != null);
+
+const DECKS_DIR = `${import.meta.dir}/../../decks`;
+
+type DeckEntry = { id: string; name: string; text: string; size: number };
+const DECK_REGISTRY: DeckEntry[] = [];
+const DECK_BY_ID: Record<string, DeckEntry> = {};
+const _resolvedCache: Record<string, any[]> = {};
+
+function loadDecks(): void {
+  let files: string[] = [];
+  try {
+    files = readdirSync(DECKS_DIR).filter((f: string) => f.endsWith(".json")).sort();
+  } catch {
+    return; // no decks dir -> placeholder fallback remains available
+  }
+  for (const f of files) {
+    try {
+      const j = JSON.parse(readFileSync(`${DECKS_DIR}/${f}`, "utf-8"));
+      if (!j?.cards) continue;
+      const id = f.replace(/\.json$/, "");
+      const entry: DeckEntry = { id, name: j.name ?? id, text: j.cards, size: 0 };
+      DECK_REGISTRY.push(entry);
+      DECK_BY_ID[id] = entry;
+    } catch {
+      // skip malformed deck files
+    }
+  }
+}
+loadDecks();
+
+function resolveDeck(id: string): any[] {
+  if (_resolvedCache[id]) return _resolvedCache[id];
+  const entry = DECK_BY_ID[id];
+  if (!entry) throw new Error(`unknown deck "${id}"`);
+  const { cards } = resolveLorcanaDeckListTextFromPool(entry.text, CARD_POOL) as any;
+  entry.size = cards.length;
+  _resolvedCache[id] = cards;
+  return cards;
+}
+
+/** Deterministic deck pick from a seed string (stable across processes). */
+function pickDeck(seed: string, salt: string): string {
+  let h = 2166136261 >>> 0;
+  const s = seed + ":" + salt;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return DECK_REGISTRY[h % DECK_REGISTRY.length].id;
+}
+
+// The planner DEFAULTS an unset informationPolicy to "oracle" (full-deck
+// visibility into the opponent's hidden cards). Oracle play must NEVER generate
+// training targets — it would teach the net to clone decisions made with info
+// it can't see. `fair()` forces public-zones-only knowledge; the registry below
+// is fair-by-default and isolates oracle to explicit, eval-only use.
+function fair(base: AutomatedActionStrategy, name?: string): AutomatedActionStrategy {
+  return { ...base, name: name ?? `fair:${base.name}`, informationPolicy: "fair" };
+}
+
+/** Effective policy a strategy resolves to (mirrors planner's `?? "oracle"`). */
+function effectivePolicy(s: AutomatedActionStrategy): "fair" | "oracle" {
+  return (s.informationPolicy ?? "oracle") as "fair" | "oracle";
+}
+
 const STRATEGIES: Record<string, AutomatedActionStrategy> = {
-  best: bestDeckAwareOracleLoreRaceAutomatedActionStrategy,
-  bestFair: bestDeckAwareLoreRaceAutomatedActionStrategy,
-  deckAware: deckAwareLoreRaceAutomatedActionStrategy,
+  // --- FAIR (training-safe): public-zones knowledge only ---
+  best: bestDeckAwareLoreRaceAutomatedActionStrategy,             // already fair
+  fairBest: bestDeckAwareLoreRaceAutomatedActionStrategy,
+  fairDefault: fair(defaultLoreRaceAutomatedActionStrategy),
+  fairControl: fair(boardControlLoreRaceAutomatedActionStrategy),
+  fairAggro: fair(aggressiveBoardControlLoreRaceAutomatedActionStrategy),
+  deckAware: fair(deckAwareLoreRaceAutomatedActionStrategy),      // forced fair
+  // --- ORACLE (EVAL ONLY — never use for training data/targets) ---
+  oracle: bestDeckAwareOracleLoreRaceAutomatedActionStrategy,
+  oracleDeckAware: deckAwareLoreRaceAutomatedActionStrategy,
 };
 
 const FORCED_FAMILIES = new Set([
@@ -136,40 +230,144 @@ function viewFor(actorId: string | undefined): "playerOne" | "playerTwo" {
   return actorId === CANONICAL_PLAYER_TWO ? "playerTwo" : "playerOne";
 }
 
+/** Shallow-copy top level + G + ctx so loadState's in-place mutation
+ *  (invalidateStaticEffects bumps G.staticEffectsVersion) can't corrupt the
+ *  canonical immutable snapshot. Cheap (a few key spreads), not a deep clone. */
+function shallowProtect(s: any): any {
+  return { ...s, G: { ...s.G }, ctx: { ...s.ctx } };
+}
+
 class Session {
   engine: AnyEngine;
   seed: string;
   steps = 0;
+  deckP1: string | null;
+  deckP2: string | null;
   private snapshots = new Map<number, any>();
   private snapCounter = 0;
 
-  constructor(seed: string) {
+  constructor(seed: string, deckP1?: string | null, deckP2?: string | null) {
     this.seed = seed;
-    this.engine = LorcanaMultiplayerTestEngine.createWithFixture(
-      { hand: 7, deck: 60 },
-      { hand: 7, deck: 60 },
-      { skipPreGame: false, seed },
-    );
+    this.deckP1 = deckP1 ?? null;
+    this.deckP2 = deckP2 ?? null;
+    if (this.deckP1 && this.deckP2) {
+      // real tournament decks
+      this.engine = LorcanaMultiplayerTestEngine.createWithFixture(
+        { deck: resolveDeck(this.deckP1) },
+        { deck: resolveDeck(this.deckP2) },
+        { skipPreGame: false, seed },
+      );
+    } else {
+      // placeholder fallback (no decks available / explicitly requested)
+      this.engine = LorcanaMultiplayerTestEngine.createWithFixture(
+        { hand: 7, deck: 60 },
+        { hand: 7, deck: 60 },
+        { skipPreGame: false, seed },
+      );
+    }
   }
 
-  /** Clone the authoritative state and stash it; return a handle id. */
+  /** Opponent's true hidden zones (authoritative) — belief-training targets.
+   *  Returned for the *current actor's* opponent. Used ONLY for supervision /
+   *  determinization on the Python side, never fed into the policy/value trunk. */
+  private oppHidden(selfId: string) {
+    const oppId = selfId === CANONICAL_PLAYER_ONE ? CANONICAL_PLAYER_TWO : CANONICAL_PLAYER_ONE;
+    const st: any = this.engine.getAuthoritativeState();
+    const zc = st.ctx.zones.private.zoneCards;
+    const grab = (base: string) =>
+      (zc[`${base}:${oppId}`] ?? []).map((id: string) => ({
+        id,
+        def: this.engine.getCardDefinitionId?.(id) ?? null,
+      }));
+    return { hand: grab("hand"), deck: grab("deck"), inkwell: grab("inkwell") };
+  }
+
+  /** Repartition the opponent's hidden cards into hand/deck per a belief sample,
+   *  then loadState — produces a determinized world the search runs on. Operates
+   *  on the *current* authoritative state (caller restores the true root first). */
+  determinize(selfId: string, handInstanceIds: string[], seed?: string): boolean {
+    const oppId = selfId === CANONICAL_PLAYER_ONE ? CANONICAL_PLAYER_TWO : CANONICAL_PLAYER_ONE;
+    const clone: any = structuredClone(this.engine.getAuthoritativeState());
+    const zc = clone.ctx.zones.private.zoneCards;
+    const sum = clone.ctx.zones.public.zoneSummaries;
+    const handKey = `hand:${oppId}`;
+    const deckKey = `deck:${oppId}`;
+    const pool: string[] = [...(zc[handKey] ?? []), ...(zc[deckKey] ?? [])];
+    const wantHand = handInstanceIds.filter((id) => pool.includes(id));
+    const handSet = new Set(wantHand);
+    let rest = pool.filter((id) => !handSet.has(id));
+    if (seed) {
+      // deterministic shuffle of the residual deck order from the seed
+      let h = 0;
+      for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+      const rng = () => ((h = (h * 1103515245 + 12345) >>> 0) / 0xffffffff);
+      for (let i = rest.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [rest[i], rest[j]] = [rest[j], rest[i]];
+      }
+    }
+    zc[handKey] = wantHand;
+    zc[deckKey] = rest;
+    if (sum[handKey]) sum[handKey] = { ...sum[handKey], count: wantHand.length, revision: (sum[handKey].revision || 0) + 1 };
+    if (sum[deckKey]) sum[deckKey] = { ...sum[deckKey], count: rest.length, revision: (sum[deckKey].revision || 0) + 1 };
+    this.engine.loadState(clone);
+    return true;
+  }
+
+  /** O(1) snapshot: the engine state is immutable (Mutative structural sharing),
+   *  so we just hold the reference — no deep clone. Every transition reassigns a
+   *  NEW state object, leaving snapshots intact. */
   snapshot(): number {
     const id = ++this.snapCounter;
-    const state = structuredClone(this.engine.getAuthoritativeState());
-    this.snapshots.set(id, state);
+    this.snapshots.set(id, this.engine.getAuthoritativeState());
     return id;
   }
 
-  /** Restore a previously-taken snapshot (clone so it stays reusable). */
+  /** O(1) restore: re-point the runtime at the snapshot. We shallow-copy the top
+   *  level + G + ctx so `loadState`'s in-place `invalidateStaticEffects`
+   *  (G.staticEffectsVersion++) lands on the copy, never the canonical snapshot.
+   *  The deep state is structurally shared and immutable — safe to alias. */
   restore(id: number): boolean {
     const stored = this.snapshots.get(id);
     if (!stored) return false;
-    this.engine.loadState(structuredClone(stored));
+    this.engine.loadState(shallowProtect(stored));
     return true;
   }
 
   dropSnapshot(id: number): void {
     this.snapshots.delete(id);
+  }
+
+  /** Execute one chosen action key from the current state (no observe). */
+  private executeKey(key: string): boolean {
+    const server = this.engine.asServer();
+    if (key === PASS_KEY) {
+      const res = server.takeAutomatedActionForCurrentActor({ strategy: PASS_STRATEGY });
+      return Boolean(res.finalResult?.success) || res.fallbackTaken === "passTurn";
+    }
+    const res = server.takeAutomatedActionForCurrentActor({ strategy: chooseKeyStrategy(key) });
+    return Boolean(res.finalResult?.success);
+  }
+
+  /** Execute a batch of descent paths IN-PROCESS from a root snapshot, returning
+   *  each path's leaf observation. One IPC replaces (paths × pathLen) per-step
+   *  round-trips — the core of the in-process search (architecture doc §4.2). */
+  runPaths(rootId: number, paths: string[][]): any[] {
+    const out: any[] = [];
+    for (const keys of paths) {
+      this.restore(rootId);
+      for (const key of keys) {
+        if (this.observe0Done()) break;   // stop early if a path hit terminal
+        this.executeKey(key);
+      }
+      out.push(this.observe());
+    }
+    return out;
+  }
+
+  private observe0Done(): boolean {
+    const b: any = this.engine.getBoard("playerOne");
+    return b.status === "finished";
   }
 
   private currentActor(): string | undefined {
@@ -246,6 +444,7 @@ class Session {
       cards,
       legal,
       forced,
+      hidden: this.oppHidden(selfId),
     };
   }
 
@@ -275,7 +474,9 @@ class Session {
     const family = res.selectedCandidate?.family ?? (res.fallbackTaken ?? null);
     this.steps += 1;
     const obs = this.observe();
-    return { obs, executed, family, success: Boolean(res.finalResult?.success) };
+    // `policy` lets the Python side assert no oracle play taints training data.
+    return { obs, executed, family, success: Boolean(res.finalResult?.success),
+             policy: effectivePolicy(strategy) };
   }
 }
 
@@ -288,8 +489,26 @@ function handle(req: any): any {
     case "ping":
       return { ok: true, pong: true };
     case "reset": {
-      session = new Session(String(req.seed ?? "seed-0"));
-      return { ok: true, obs: session.observe() };
+      const seed = String(req.seed ?? "seed-0");
+      // deck selection: explicit ids, "placeholder" to force the fallback, or
+      // deterministic pick from the seed when decks are available.
+      let p1: string | null = null;
+      let p2: string | null = null;
+      const usePlaceholder = req.deckP1 === "placeholder" || req.deckP2 === "placeholder"
+        || DECK_REGISTRY.length === 0;
+      if (!usePlaceholder) {
+        p1 = req.deckP1 ? String(req.deckP1) : pickDeck(seed, "p1");
+        p2 = req.deckP2 ? String(req.deckP2) : pickDeck(seed, "p2");
+        if (!DECK_BY_ID[p1] || !DECK_BY_ID[p2]) {
+          return { ok: false, error: `unknown deck(s): ${p1}, ${p2}` };
+        }
+      }
+      session = new Session(seed, p1, p2);
+      return { ok: true, obs: session.observe(),
+               decks: { p1: session.deckP1, p2: session.deckP2 } };
+    }
+    case "list_decks": {
+      return { ok: true, decks: DECK_REGISTRY.map((d) => ({ id: d.id, name: d.name })) };
     }
     case "observe": {
       if (!session) return { ok: false, error: "no session" };
@@ -317,6 +536,18 @@ function handle(req: any): any {
       if (!session) return { ok: false, error: "no session" };
       session.dropSnapshot(Number(req.id));
       return { ok: true };
+    }
+    case "determinize": {
+      if (!session) return { ok: false, error: "no session" };
+      const self = String(req.self);
+      const handIds: string[] = Array.isArray(req.handInstanceIds) ? req.handInstanceIds : [];
+      session.determinize(self, handIds, req.seed ? String(req.seed) : undefined);
+      return { ok: true, obs: session.observe() };
+    }
+    case "run_paths": {
+      if (!session) return { ok: false, error: "no session" };
+      const paths: string[][] = Array.isArray(req.paths) ? req.paths : [];
+      return { ok: true, obs: session.runPaths(Number(req.root), paths) };
     }
     case "close":
       return { ok: true, bye: true };

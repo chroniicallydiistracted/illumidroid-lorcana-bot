@@ -12,7 +12,7 @@ dev = ["pytest>=8.0"]
 testpaths = ["tests"]
 addopts = "-q"
 # Bridge/search tests spawn the Bun engine and can run a few minutes each.
-markers = []
+markers = ["slow: engine-backed, slow (spawns the Bun engine)"]
 
 [tool.setuptools]
 packages = ["engine", "network", "search", "training"]

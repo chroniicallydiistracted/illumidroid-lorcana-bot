@@ -94,3 +94,41 @@ class ValueHead(nn.Module):
         target.scatter_add_(1, lower.unsqueeze(1), w_lower.unsqueeze(1))
         target.scatter_add_(1, upper.unsqueeze(1), w_upper.unsqueeze(1))
         return target
+
+
+class BeliefHead(nn.Module):
+    """Phase 2 — leak-free belief over the opponent's hidden hand.
+
+    Scores each candidate pool card (its identity embedding) against the trunk
+    vector (built ONLY from the acting player's filtered view). Output is a
+    per-candidate logit for `P(card currently in opp hand)`. Candidate
+    embeddings never enter the trunk, so the policy/value heads cannot see
+    opponent identities — the belief is predicted, not observed.
+    """
+
+    def __init__(self, d_model: int, hidden: int = 128) -> None:
+        super().__init__()
+        self.scorer = nn.Sequential(
+            nn.Linear(2 * d_model, hidden), nn.GELU(),
+            nn.Linear(hidden, hidden), nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, trunk_vec: torch.Tensor, cand_emb: torch.Tensor,
+                cand_mask: torch.Tensor) -> torch.Tensor:
+        """trunk_vec [B,D], cand_emb [B,P,D], cand_mask [B,P] -> logits [B,P]."""
+        B, P, D = cand_emb.shape
+        trunk_rep = trunk_vec.unsqueeze(1).expand(B, P, D)
+        feat = torch.cat([trunk_rep, cand_emb], dim=-1)
+        logits = self.scorer(feat).squeeze(-1)            # [B, P]
+        return logits.masked_fill(~cand_mask, NEG_INF)
+
+    @staticmethod
+    def normalize_to_count(probs: torch.Tensor, mask: torch.Tensor,
+                           handcount: torch.Tensor) -> torch.Tensor:
+        """Scale per-card probabilities so they sum to the known hand size
+        (count-consistency projection, architecture doc §2.4)."""
+        probs = probs * mask.float()
+        s = probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        scaled = probs * (handcount.unsqueeze(-1) / s)
+        return scaled.clamp(0.0, 1.0)

@@ -14,7 +14,7 @@ import argparse
 import numpy as np
 
 from engine.bridge import LorcanaEngine
-from engine.serialization import encode_obs
+from engine.serialization import encode_obs, encode_belief
 from training.learner import Sample, ReplayBuffer, Learner
 
 
@@ -28,45 +28,63 @@ def _legal_index(legal: list[dict], stable_key: str | None) -> int | None:
 
 
 def generate_game(engine: LorcanaEngine, seed: str, strategy: str = "best",
-                  max_steps: int = 400) -> list[Sample]:
+                  max_steps: int = 400, deck_p1: str | None = None,
+                  deck_p2: str | None = None) -> list[Sample]:
     """Play one fully-scripted game; return BC samples (pi target filled at the
     end once the winner is known)."""
-    obs = engine.reset(seed)
-    pending: list[tuple[dict, np.ndarray, str]] = []  # (enc, pi, actor)
+    obs = engine.reset(seed, deck_p1, deck_p2)
+    pending: list[tuple[dict, np.ndarray, str, dict]] = []  # (enc, pi, actor, belief)
     steps = 0
     while not obs.get("done") and steps < max_steps:
         legal = obs.get("legal", [])
         actor = obs.get("actor")
         enc = encode_obs(obs)
+        bel = encode_belief(obs)
         r = engine.step_auto(strategy)
+        if r.get("policy") == "oracle":
+            raise ValueError(
+                f"Refusing to behaviour-clone an ORACLE strategy ('{strategy}'): it "
+                "chooses with full-deck visibility, so its actions are not learnable "
+                "from the fog-of-war observation. Use a fair strategy (e.g. 'best')."
+            )
         idx = _legal_index(legal, r.get("executed"))
         if idx is not None and actor is not None and legal:
             pi = np.zeros(len(legal), dtype=np.float32)
             pi[idx] = 1.0
-            pending.append((enc, pi, actor))
+            pending.append((enc, pi, actor, bel))
         obs = r["obs"]
         steps += 1
 
     winner = obs.get("winner")
     samples: list[Sample] = []
-    for enc, pi, actor in pending:
+    for enc, pi, actor, bel in pending:
         if winner is None:
             z = 0.0
         else:
             z = 1.0 if str(winner) == str(actor) else -1.0
-        samples.append(Sample(enc=enc, pi=pi, z=z))
+        samples.append(Sample(enc=enc, pi=pi, z=z, belief=bel))
     return samples
 
 
 def generate_dataset(n_games: int, strategy: str = "best", seed_prefix: str = "bc",
-                     max_steps: int = 400, verbose: bool = True) -> ReplayBuffer:
+                     max_steps: int = 400, verbose: bool = True,
+                     sample_decks: bool = True) -> ReplayBuffer:
+    """Generate scripted games across the deck metagame. With `sample_decks`,
+    each game draws a distinct random real-deck pair (deck diversity, §6)."""
+    import random
     buf = ReplayBuffer()
     with LorcanaEngine() as engine:
+        deck_ids = [d["id"] for d in engine.list_decks()] if sample_decks else []
+        rng = random.Random(seed_prefix)
         for g in range(n_games):
-            samples = generate_game(engine, f"{seed_prefix}-{g}", strategy, max_steps)
+            p1 = p2 = None
+            if len(deck_ids) >= 2:
+                p1, p2 = rng.sample(deck_ids, 2)
+            samples = generate_game(engine, f"{seed_prefix}-{g}", strategy, max_steps, p1, p2)
             buf.extend(samples)
             if verbose:
-                print(f"  game {g+1}/{n_games}: +{len(samples)} samples "
+                tag = f" [{p1} vs {p2}]" if p1 else ""
+                print(f"  game {g+1}/{n_games}{tag}: +{len(samples)} samples "
                       f"(buffer={len(buf)})", flush=True)
     return buf
 
@@ -93,9 +111,11 @@ def main() -> None:
     learner = Learner(net, lr=args.lr)
     for ep in range(args.epochs):
         stats = learner.train_epoch(buf, batch_size=args.batch_size)
+        belief = (f" belief={stats['belief']:.4f} sep={stats['belief_sep']:.3f} "
+                  f"cnt_mae={stats['belief_count_mae']:.2f}") if "belief" in stats else ""
         print(f"[bootstrap] epoch {ep+1}/{args.epochs}: "
               f"loss={stats['loss']:.4f} policy={stats['policy']:.4f} "
-              f"value={stats['value']:.4f} H={stats['entropy']:.3f}", flush=True)
+              f"value={stats['value']:.4f} H={stats['entropy']:.3f}{belief}", flush=True)
 
     import os
     os.makedirs(os.path.dirname(args.out), exist_ok=True)

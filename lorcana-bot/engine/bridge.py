@@ -71,8 +71,23 @@ class LorcanaEngine:
         return resp
 
     # -- high-level api -------------------------------------------------------
-    def reset(self, seed: str = "seed-0") -> dict:
-        return self._rpc({"op": "reset", "seed": seed})["obs"]
+    def reset(self, seed: str = "seed-0", deck_p1: str | None = None,
+              deck_p2: str | None = None) -> dict:
+        """Start a game. With deck ids (see `list_decks`), uses those real
+        tournament decks; omit them to deterministically pick a pair from the
+        seed; pass deck_p1="placeholder" to force the synthetic fallback."""
+        req = {"op": "reset", "seed": seed}
+        if deck_p1 is not None:
+            req["deckP1"] = deck_p1
+        if deck_p2 is not None:
+            req["deckP2"] = deck_p2
+        resp = self._rpc(req)
+        self.last_decks = resp.get("decks")
+        return resp["obs"]
+
+    def list_decks(self) -> list[dict]:
+        """Available real decks: [{id, name}, ...]."""
+        return self._rpc({"op": "list_decks"})["decks"]
 
     def observe(self) -> dict:
         return self._rpc({"op": "observe"})["obs"]
@@ -95,6 +110,22 @@ class LorcanaEngine:
 
     def drop_snapshot(self, snap_id: int) -> None:
         self._rpc({"op": "drop_snapshot", "id": snap_id})
+
+    def run_paths(self, root_snap: int, paths: list[list[str]]) -> list[dict]:
+        """Execute a batch of descent paths (lists of stableKeys) in-process from
+        the root snapshot; return each path's leaf observation. One round-trip
+        replaces (paths x path-length) per-step calls — the in-process search."""
+        return self._rpc({"op": "run_paths", "root": root_snap, "paths": paths})["obs"]
+
+    def determinize(self, self_id: str, hand_instance_ids: list[str],
+                    seed: str | None = None) -> dict:
+        """Repartition the opponent's hidden cards into hand=hand_instance_ids
+        (deck = the rest), producing a determinized world. Operates on the
+        current state — restore the true root first. Returns the world's obs."""
+        req = {"op": "determinize", "self": self_id, "handInstanceIds": hand_instance_ids}
+        if seed is not None:
+            req["seed"] = seed
+        return self._rpc(req)["obs"]
 
     def close(self) -> None:
         if self._proc.poll() is None:

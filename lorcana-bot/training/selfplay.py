@@ -14,29 +14,38 @@ import argparse
 import numpy as np
 
 from engine.bridge import LorcanaEngine
-from engine.serialization import encode_obs
+from engine.serialization import encode_obs, encode_belief
 from search.ismcts import BISMCTS, SearchConfig
-from search.evaluator import NetEvaluator
+from search.evaluator import NetEvaluator, BeliefEvaluator
 from training.learner import Sample, ReplayBuffer, Learner
 
 
 def play_game(engine: LorcanaEngine, net, cfg: SearchConfig, seed: str,
-              max_steps: int = 400, rng: np.random.Generator | None = None
-              ) -> list[Sample]:
+              max_steps: int = 400, rng: np.random.Generator | None = None,
+              use_belief: bool = True, n_worlds: int = 6,
+              deck_p1: str | None = None, deck_p2: str | None = None) -> list[Sample]:
+    """Self-play one game with B-ISMCTS. With `use_belief`, each decision uses
+    belief-sampled importance-weighted determinization (Phase 2); otherwise the
+    Phase-1 single-world search. Logs (I, π_MCTS, z, belief target)."""
     rng = rng or np.random.default_rng()
     evaluator = NetEvaluator(net)
     mcts = BISMCTS(engine, evaluator, cfg, rng)
-    obs = engine.reset(seed)
-    pending: list[tuple[dict, np.ndarray, str]] = []
+    belief_eval = BeliefEvaluator(net) if use_belief else None
+    obs = engine.reset(seed, deck_p1, deck_p2)
+    pending: list[tuple[dict, np.ndarray, str, dict]] = []
     steps = 0
     while not obs.get("done") and steps < max_steps:
         legal = obs.get("legal", [])
         actor = obs.get("actor")
         if not legal:
             break
-        res = mcts.run(obs)  # leaves the engine on the root decision state
+        if use_belief:
+            res = mcts.run_belief(obs, belief_eval, n_worlds=n_worlds,
+                                  sims_per_world=cfg.simulations)
+        else:
+            res = mcts.run(obs)  # leaves the engine on the root decision state
         if actor is not None and len(res.pi) == len(legal):
-            pending.append((encode_obs(obs), res.pi.copy(), actor))
+            pending.append((encode_obs(obs), res.pi.copy(), actor, encode_belief(obs)))
         # sample an action from the (temperature-shaped) visit policy
         a = int(rng.choice(len(res.pi), p=res.pi)) if res.pi.sum() > 0 else 0
         key = legal[a]["stableKey"]
@@ -45,9 +54,9 @@ def play_game(engine: LorcanaEngine, net, cfg: SearchConfig, seed: str,
 
     winner = obs.get("winner")
     samples = []
-    for enc, pi, actor in pending:
+    for enc, pi, actor, bel in pending:
         z = 0.0 if winner is None else (1.0 if str(winner) == str(actor) else -1.0)
-        samples.append(Sample(enc=enc, pi=pi, z=z))
+        samples.append(Sample(enc=enc, pi=pi, z=z, belief=bel))
     return samples
 
 
@@ -55,12 +64,20 @@ def run_iteration(net, cfg: SearchConfig, n_games: int, seed_prefix: str,
                   learner: Learner, buffer: ReplayBuffer, epochs: int = 1,
                   batch_size: int = 64, verbose: bool = True) -> dict:
     rng = np.random.default_rng()
+    import random
+    pair_rng = random.Random(seed_prefix)
     with LorcanaEngine() as engine:
+        deck_ids = [d["id"] for d in engine.list_decks()]
         for g in range(n_games):
-            samples = play_game(engine, net, cfg, f"{seed_prefix}-{g}", rng=rng)
+            p1 = p2 = None
+            if len(deck_ids) >= 2:
+                p1, p2 = pair_rng.sample(deck_ids, 2)
+            samples = play_game(engine, net, cfg, f"{seed_prefix}-{g}", rng=rng,
+                                deck_p1=p1, deck_p2=p2)
             buffer.extend(samples)
             if verbose:
-                print(f"  selfplay game {g+1}/{n_games}: +{len(samples)} "
+                tag = f" [{p1} vs {p2}]" if p1 else ""
+                print(f"  selfplay game {g+1}/{n_games}{tag}: +{len(samples)} "
                       f"(buffer={len(buffer)})", flush=True)
     last = {}
     for _ in range(epochs):
