@@ -247,10 +247,36 @@ python -m training.distributed --init lorcana-bot/checkpoints/bc_fair.pt \
   --rounds R --actors 8 --games-per-actor 1 --sims 8 --n-worlds 4   # [--no-belief]
 ```
 
-Next levers (not yet done): **leaf-batching with virtual loss** → batch many
-sims' leaves into one `run_paths` IPC + one GPU net batch (only then does the GPU
-get fed; the search already takes a pluggable evaluator). **Rust engine port** is
-the ceiling-raiser but a 92k-LOC / 205-suite trap — deferred indefinitely.
+**Leaf-batching + batched GPU inference (DONE).** `SearchConfig.batch_size>1`
+enables virtual-loss wave batching (`InfoSetNode.vloss`, `BISMCTS.run_batched`):
+each wave descends B sims with virtual loss so they fan out, executes all paths
+in ONE `run_paths` IPC, and evaluates all leaves in ONE batched net forward
+(`NetEvaluator.batch_eval`) on the GPU. Collisions (same new leaf) are deduped.
+
+**Net size:** default scaled to **d512×8 ≈ 13M params** (the useful ceiling for
+this box — VRAM allows ~37M fp32 but data/latency cap usefulness lower). GPU
+engages at batch ≥256 + net ≥5M; the small 0.7M net leaves the GPU idle.
+
+**All-in-one runner:** `./train.sh [flags]` → `training/run.py`. **Parallel by
+default** (`--actors 6`): K spawn-isolated CPU workers (`training/parallel.py`)
+each own a Bun engine + run batched belief self-play, **streaming** progress +
+samples to a shared queue; the main process runs the GPU learner (KL+entropy) and
+updates a **`LiveMonitor`** (`training/monitor.py`) heartbeat every 3 s (phase,
+sims/s, dec/s, games/h, buffer, loss, winrate, GPU mem, ETA, per-worker result)
+so a round is never a silent/blocked wait. `--actors 1` = single-process. Fresh
+workers reload the latest weights each round (spawn keeps them CUDA-free; only
+the main process touches the GPU). Ctrl-C saves and exits.
+```bash
+./train.sh                                   # ~13M net, 6 actors, runs forever
+./train.sh --actors 8 --rounds 50 --sims 24 --batch 48 --eval-every 5
+./train.sh --actors 1                        # single-process fallback
+```
+Gotchas baked in (were bugs): worker rng needs an int seed; all worker setup is
+inside try/except so a crash reports instead of hanging; the drain loop has a
+liveness guard so a dead worker can't stall the round.
+
+**Rust engine port** is the ceiling-raiser but a 92k-LOC / 205-suite trap (see
+`lorcana-bot/PORT-AUDIT.md`) — deferred indefinitely.
 
 Clean prior checkpoint: `bc_fair.pt` (fair data). Pre-fairness-fix checkpoints
 were deleted as oracle-tainted.

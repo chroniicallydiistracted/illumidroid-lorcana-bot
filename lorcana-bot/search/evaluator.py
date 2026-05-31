@@ -19,6 +19,9 @@ class UniformEvaluator:
             return np.zeros(0, dtype=np.float32), 0.0
         return np.ones(n, dtype=np.float32) / n, 0.0
 
+    def batch_eval(self, obs_list: list[dict]) -> list[tuple[np.ndarray, float]]:
+        return [self(o) for o in obs_list]
+
 
 class NetEvaluator:
     def __init__(self, net, device=None) -> None:
@@ -33,6 +36,19 @@ class NetEvaluator:
         batch = collate([encode_obs(obs)])
         priors, values = self.net.infer(batch, self.device)
         return priors[0, :n].astype(np.float32), float(values[0])
+
+    def batch_eval(self, obs_list: list[dict]) -> list[tuple[np.ndarray, float]]:
+        """Evaluate many leaves in ONE forward (the batched-GPU-inference path).
+        Returns per-leaf (priors over its legal actions, value)."""
+        if not obs_list:
+            return []
+        encoded = [encode_obs(o) for o in obs_list]
+        priors, values = self.net.infer(collate(encoded), self.device)
+        out = []
+        for i, o in enumerate(obs_list):
+            n = len(o.get("legal", []))
+            out.append((priors[i, :n].astype(np.float32), float(values[i])))
+        return out
 
 
 class BeliefEvaluator:

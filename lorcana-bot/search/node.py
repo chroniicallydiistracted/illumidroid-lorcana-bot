@@ -17,7 +17,7 @@ import numpy as np
 class InfoSetNode:
     __slots__ = (
         "obs", "actor", "legal", "n_actions", "terminal", "winner",
-        "P", "N", "W", "children", "expanded", "leaf_value",
+        "P", "N", "W", "vloss", "children", "expanded", "leaf_value",
     )
 
     def __init__(self, obs: dict) -> None:
@@ -30,9 +30,18 @@ class InfoSetNode:
         self.P = np.zeros(self.n_actions, dtype=np.float32)
         self.N = np.zeros(self.n_actions, dtype=np.float32)
         self.W = np.zeros(self.n_actions, dtype=np.float32)
+        # virtual loss: temporary per-edge penalty so concurrent in-wave sims
+        # diverge to different leaves (each counts as a pending loss of -1).
+        self.vloss = np.zeros(self.n_actions, dtype=np.float32)
         self.children: dict[int, "InfoSetNode"] = {}
         self.expanded = False
         self.leaf_value: float = 0.0
+
+    def add_vloss(self, a: int) -> None:
+        self.vloss[a] += 1.0
+
+    def remove_vloss(self, a: int) -> None:
+        self.vloss[a] = max(0.0, self.vloss[a] - 1.0)
 
     def expand(self, priors: np.ndarray, leaf_value: float) -> None:
         n = self.n_actions
@@ -53,23 +62,26 @@ class InfoSetNode:
 
     def select(self, c_puct: float, pw_c: float, pw_alpha: float,
                fpu: float = 0.0) -> int:
-        """PUCT with progressive widening over actions ranked by prior."""
+        """PUCT with progressive widening over actions ranked by prior.
+        Uses *effective* stats (N + virtual loss; W − virtual loss) so that,
+        within a batched wave, already-selected edges look worse and the next
+        sim diverges to a different leaf."""
         n = self.n_actions
         if n == 1:
             return 0
-        total = self.total_visits()
-        # progressive widening: how many actions are currently "open"
+        n_eff = self.N + self.vloss
+        total = float(n_eff.sum())
         allowed = max(1, int(math.ceil(pw_c * (total + 1.0) ** pw_alpha)))
         allowed = min(allowed, n)
         order = np.argsort(-self.P)  # by prior desc
         open_actions = order[:allowed]
 
         sqrt_total = math.sqrt(total + 1.0)
-        q = self.q_values()
         best_a, best_score = int(open_actions[0]), -1e18
         for a in open_actions:
-            qa = q[a] if self.N[a] > 0 else fpu
-            u = c_puct * self.P[a] * sqrt_total / (1.0 + self.N[a])
+            ne = n_eff[a]
+            qa = ((self.W[a] - self.vloss[a]) / ne) if ne > 0 else fpu
+            u = c_puct * self.P[a] * sqrt_total / (1.0 + ne)
             score = qa + u
             if score > best_score:
                 best_score, best_a = score, int(a)

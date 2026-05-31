@@ -54,6 +54,7 @@ class SearchConfig:
     dirichlet_eps: float = 0.0    # >0 only at self-play root
     n_determinizations: int = 1   # Phase 1: realized world only (Phase 2 hook)
     temperature: float = 1.0
+    batch_size: int = 1           # >1 = virtual-loss wave batching (batched GPU inference)
 
 
 @dataclass
@@ -90,6 +91,8 @@ class BISMCTS:
         root.P = (1 - self.cfg.dirichlet_eps) * root.P + self.cfg.dirichlet_eps * noise.astype(np.float32)
 
     def run(self, root_obs: dict) -> SearchResult:
+        if self.cfg.batch_size > 1:
+            return self.run_batched(root_obs)
         cfg = self.cfg
         root = InfoSetNode(root_obs)
         if root.terminal or root.n_actions == 0:
@@ -172,6 +175,104 @@ class BISMCTS:
                             stats={"n_worlds": n_worlds, "pooled_worlds": pooled_worlds,
                                    "total_weight": total_w, "proposal": proposal,
                                    "root_visits": shared.total_visits()})
+
+    def run_batched(self, root_obs: dict) -> SearchResult:
+        """Wave-batched PUCT (batched GPU inference). Each wave: descend
+        `batch_size` sims with virtual loss so they fan out to different leaves,
+        execute all their paths in ONE `run_paths` IPC, evaluate all leaves in
+        ONE batched net forward (GPU), then back up. Falls back to stored values
+        for sims that re-hit terminal/depth nodes (no engine/net touch)."""
+        cfg = self.cfg
+        root = InfoSetNode(root_obs)
+        if root.terminal or root.n_actions == 0:
+            return SearchResult(pi=np.zeros(root.n_actions, np.float32), value=0.0, root=root)
+        self._evaluate_and_expand(root)
+        self._add_root_noise(root)
+
+        root_snap = self.engine.snapshot()
+        sims_done = 0
+        max_batch = 0
+        try:
+            while sims_done < cfg.simulations:
+                wave = min(cfg.batch_size, cfg.simulations - sims_done)
+                pending = []  # (path, keys, parent, leaf_action)
+                for _ in range(wave):
+                    path, keys, create, parent, la, leaf_node, leaf_v = self._descend_vloss(root)
+                    if create:
+                        pending.append((path, keys, parent, la))
+                    else:  # terminal / depth re-hit: known value, no engine/net
+                        self._backup(path, leaf_node, leaf_v)
+                        sims_done += 1
+                if not pending:
+                    continue
+                # ONE IPC: execute every descent path in-process -> leaf observations
+                leaf_obs_list = self.engine.run_paths(root_snap, [p[1] for p in pending])
+                # materialize leaf nodes (dedup collisions where sims hit the same new leaf)
+                created: dict[tuple, InfoSetNode] = {}
+                to_eval: list[tuple[InfoSetNode, int]] = []
+                leaves: list[InfoSetNode] = []
+                for i, (path, keys, parent, la) in enumerate(pending):
+                    leaf = parent.children.get(la) or created.get((id(parent), la))
+                    if leaf is None:
+                        leaf = InfoSetNode(leaf_obs_list[i])
+                        parent.children[la] = leaf
+                        created[(id(parent), la)] = leaf
+                        if leaf.terminal or leaf.n_actions == 0:
+                            leaf.expanded = True
+                            leaf.leaf_value = 0.0
+                        else:
+                            to_eval.append((leaf, i))
+                    leaves.append(leaf)
+                # ONE batched forward (GPU) for all unique non-terminal leaves
+                if to_eval:
+                    evals = self.evaluator.batch_eval([leaf_obs_list[i] for _, i in to_eval])
+                    for (leaf, _), (priors, value) in zip(to_eval, evals):
+                        leaf.expand(np.asarray(priors, np.float32), float(value))
+                    max_batch = max(max_batch, len(to_eval))
+                for (path, keys, parent, la), leaf in zip(pending, leaves):
+                    self._backup(path, leaf, leaf.leaf_value)
+                    sims_done += 1
+        finally:
+            self.engine.restore(root_snap)
+            self.engine.drop_snapshot(root_snap)
+
+        pi = root.visit_policy(cfg.temperature)
+        q = root.q_values()
+        value = float((pi * q).sum()) if root.total_visits() > 0 else root.leaf_value
+        return SearchResult(pi=pi, value=value, root=root, sims=sims_done,
+                            stats={"root_visits": root.total_visits(), "n_actions": root.n_actions,
+                                   "max_eval_batch": max_batch, "batch_size": cfg.batch_size})
+
+    def _descend_vloss(self, root: InfoSetNode):
+        """Tree-walk applying virtual loss; return the path + whether a new leaf
+        must be created (and where), or the terminal/depth node + its value."""
+        cfg = self.cfg
+        path: list[tuple[InfoSetNode, int]] = []
+        keys: list[str] = []
+        node = root
+        depth = 0
+        while True:
+            if node.terminal or node.n_actions == 0:
+                return path, keys, False, None, -1, node, 0.0
+            if depth >= cfg.depth_limit:
+                return path, keys, False, None, -1, node, node.leaf_value
+            a = node.select(cfg.c_puct, cfg.pw_c, cfg.pw_alpha, cfg.fpu)
+            node.add_vloss(a)
+            path.append((node, a))
+            keys.append(node.legal[a]["stableKey"])
+            child = node.children.get(a)
+            if child is None:
+                return path, keys, True, node, a, None, 0.0
+            node = child
+            depth += 1
+
+    def _backup(self, path, leaf: InfoSetNode, leaf_v: float) -> None:
+        """Remove virtual loss and apply the real visit/value along the path."""
+        for n, a in path:
+            n.remove_vloss(a)
+            v = value_for(n.actor, leaf, leaf_v)
+            n.N[a] += 1.0
+            n.W[a] += v
 
     def _simulate(self, root: InfoSetNode, root_snap: int) -> None:
         """One PUCT simulation. Phase A: walk the in-memory tree (NO engine) to
