@@ -123,17 +123,17 @@ class BISMCTS:
                             stats={"root_visits": root.total_visits(),
                                    "n_actions": root.n_actions})
 
-    def run_belief(self, root_obs: dict, belief_evaluator,
-                   n_worlds: int = 8, sims_per_world: int | None = None,
-                   proposal: str = "belief", tracker=None) -> SearchResult:
-        """Belief-guided importance-weighted determinization search (Phase 2).
+    def run_pimc_diagnostic(self, root_obs: dict, belief_evaluator,
+                            n_worlds: int = 8, sims_per_world: int | None = None,
+                            proposal: str = "belief", tracker=None) -> SearchResult:
+        """Diagnostic-only root-pooled PIMC search. Never use for training labels.
 
         Samples N opponent-hand worlds from the belief, runs a Phase-1 PUCT
         search in each determinized world, and pools the root statistics across
-        worlds weighted by importance weights ρ_i. Correct because
-        determinization only changes the opponent's HIDDEN cards, so the acting
-        player's filtered view — and hence the root legal-action set — is
-        identical across all worlds, letting us pool by action index.
+        worlds weighted by importance weights ρ_i. This legacy path has known
+        Tier-A correctness gaps: it is hand-only and creates separate per-world
+        perfect-information trees, which permits strategy fusion. It remains
+        callable only for diagnostics while the full shared-tree path is remediated.
 
         If `tracker` (a search.belief_filter.BeliefTracker) is given, worlds are
         drawn from a persistent SIR particle filter conditioned on accumulated
@@ -201,7 +201,7 @@ class BISMCTS:
     def run_infoset(self, root_obs: dict, belief_evaluator, tracker,
                     total_simulations: int | None = None) -> SearchResult:
         """Tier-A #2 — full ISMCTS over ONE shared info-set table (replaces the
-        root-pooled per-world PIMC of `run_belief`). Samples ONE posterior world per
+        root-pooled per-world PIMC of `run_pimc_diagnostic`). Samples ONE posterior world per
         simulation from the seat's persistent `tracker`, traverses the sampled world
         adaptively, and shares node-edge statistics by actor-filtered `infoSetKey` —
         removing strategy-fusion bias. `total_simulations` is the TOTAL sim budget

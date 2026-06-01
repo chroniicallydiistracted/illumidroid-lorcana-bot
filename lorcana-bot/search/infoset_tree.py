@@ -1,6 +1,6 @@
 """Tier-A #2 — full Information-Set MCTS (shared tree, root-sampled worlds).
 
-Replaces the determinized-UCT / PIMC ensemble in `BISMCTS.run_belief` (which built
+Replaces the determinized-UCT / PIMC ensemble in `BISMCTS.run_pimc_diagnostic` (which built
 a SEPARATE perfect-information tree per sampled world and pooled only root
 statistics — the strategy-fusion bug Cowling et al. 2012 warn about) with ONE
 `InfoSetTable` per root decision:

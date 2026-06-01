@@ -35,13 +35,13 @@ from engine.bridge import LorcanaEngine
 from engine.serialization import encode_obs, encode_belief, aux_targets, game_fingerprint, stuck_step
 from network.model import LorcanaNet
 from search.ismcts import BISMCTS, SearchConfig
-from search.evaluator import NetEvaluator, BeliefEvaluator
-from search.belief_filter import BeliefTracker
+from search.evaluator import NetEvaluator
 from training.learner import Learner, ReplayBuffer, Sample
 from training.monitor import LiveMonitor
 from training.trace import DecisionTracer, GameLogger
 from training.exploitability import deck_pair, gauntlet
 from training.league import NetPlayer, ScriptedPlayer
+from training.tier_a_guard import require_tier_a_clean_label_belief_training_ready
 
 
 def _outcome(winner, actor) -> float:
@@ -52,12 +52,9 @@ def _outcome(winner, actor) -> float:
 
 def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worlds,
                   tracer=None, logger=None, full_ismcts=False):
+    require_tier_a_clean_label_belief_training_ready(
+        use_belief=use_belief, context="training.run.selfplay_game")
     mcts = BISMCTS(engine, NetEvaluator(net), cfg, rng)
-    belief = BeliefEvaluator(net) if use_belief else None
-    # #4: ONE persistent SIR belief tracker PER SEAT, not a single shared/overwritten
-    # one. Each seat's posterior is over ITS opponent's hidden zones, carried across
-    # that seat's decisions (the single-stream loop alternates seats).
-    trackers: dict = {} if use_belief else {}
     p1, p2 = deck_pair(rng, deck_ids)
     obs = engine.reset(seed, p1, p2)
     if logger is not None:
@@ -73,13 +70,7 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
         if not legal:
             break
         if use_belief:
-            tracker = trackers.setdefault(obs.get("self"), BeliefTracker(rng=rng))
-            if full_ismcts:
-                res = mcts.run_infoset(obs, belief, tracker,
-                                       total_simulations=cfg.simulations * n_worlds)
-            else:
-                res = mcts.run_belief(obs, belief, n_worlds=n_worlds,
-                                      sims_per_world=cfg.simulations, tracker=tracker)
+            raise AssertionError("Tier-A guard must block belief-guided sample writing")
         else:
             res = mcts.run(obs)
         dec_obs, dec_actor = obs, actor
@@ -145,10 +136,8 @@ def main() -> None:
     ap.add_argument("--n-worlds", type=int, default=2, help="belief determinizations per decision")
     ap.add_argument("--no-belief", action="store_true")
     ap.add_argument("--full-ismcts", action="store_true",
-                    help="Tier-A #2: ONE shared info-set tree over root-sampled worlds "
-                         "(removes strategy fusion). Correctness-first: ~1 IPC/transition, "
-                         "slower than the run_belief PIMC default until the batched lane RPC "
-                         "lands. total sims/decision = --sims × --n-worlds.")
+                    help="Reserved during Tier-A remediation. Belief-guided clean-label "
+                         "training remains blocked until the release gate passes.")
     ap.add_argument("--actors", type=int, default=6,
                     help="parallel self-play worker processes (1 = single-process)")
     ap.add_argument("--games-per-actor", type=int, default=1, help="games each actor plays per round")
@@ -171,6 +160,8 @@ def main() -> None:
     device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available())
                           else (args.device if args.device != "auto" else "cpu"))
     use_belief = not args.no_belief
+    require_tier_a_clean_label_belief_training_ready(
+        use_belief=use_belief, context="training.run.main")
 
     # net: resume defines arch; otherwise build the requested net
     d_model, layers = args.d_model, args.layers

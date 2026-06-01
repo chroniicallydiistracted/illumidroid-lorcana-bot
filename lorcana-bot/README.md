@@ -1,14 +1,15 @@
-# lorcana-bot — B-ISMCTS agent (Phases 0–3 complete)
+# lorcana-bot — B-ISMCTS agent
 
 Python ML stack that drives the Lorcanito TypeScript engine to play Disney
 Lorcana. Implemented: bridge → set-transformer net (policy + distributional
 value + **belief** heads) → B-ISMCTS (PUCT, depth-limited, **belief-guided
 importance-weighted determinization**, leaf-batched GPU inference) → training
 (BC bootstrap, self-play, **league/PSRO + exploitability**). Plays the real
-25-deck tournament metagame. Phases 0–3 done; Phase 4 (ReBeL/PBS, richer value
-heads) is future.
+25-deck tournament metagame.
 
-**Run it:** `../train.sh` (parallel self-play) or `../train.sh league` (PFSP).
+**Tier-A remediation is active:** belief-guided clean-label training is
+fail-closed until the full hidden-zone shared-tree release gate passes. Run
+`../train.sh --no-belief` for non-belief diagnostics only.
 See `../CLAUDE.md` for current state + commands, `../lorcana-simulator/lorcana-bot-architecture.md`
 for the design, `PORT-AUDIT.md` for the engine-port analysis, and the phase
 reports in `../lorcana-simulator/phase{1,2,3}/`.
@@ -26,14 +27,14 @@ network/
   model.py                LorcanaNet 3 heads (+ numpy infer / belief_probs)
 search/
   node.py                 InfoSetNode: PUCT + progressive widening
-  ismcts.py               B-ISMCTS planner: run() (P1) + run_belief() (P2)
+  ismcts.py               B-ISMCTS planner: run() + diagnostic PIMC + shared-tree prototype
   determinize.py          belief-sampled worlds + importance weights (P2)
   belief_filter.py        SIR particle filter / Bayesian filtering (P2)
-  evaluator.py            Uniform/Net evaluators + BeliefEvaluator (P2)
+  evaluator.py            Uniform/Net evaluators + legacy/structured belief evaluators
 training/
   learner.py              ReplayBuffer + policy/value/belief loss + gradient steps
   bootstrap.py            behaviour cloning from the scripted automation
-  selfplay.py             AlphaZero-style self-play actor loop (belief-guided)
+  selfplay.py             AlphaZero-style self-play actor loop (belief labels guarded)
 tests/                    test_bridge / test_network / test_search
                           + test_belief / test_determinize / test_search_belief (P2)
 ```
@@ -77,8 +78,9 @@ obs = eng.step(obs["legal"][action]["stableKey"])["obs"]
 ```bash
 # Behaviour-clone the scripted oracle (Stage 0 prior):
 python -m training.bootstrap --games 20 --epochs 5 --out checkpoints/bc.pt
-# Self-play, warm-started from the BC prior:
-python -m training.selfplay --init checkpoints/bc.pt --iterations 3 --games 4 --sims 32
+# Non-belief diagnostic self-play remains available during Tier-A remediation.
+# Belief-guided clean-label training is intentionally blocked.
+python -m training.selfplay --no-belief --init checkpoints/bc.pt --iterations 3 --games 4 --sims 32
 ```
 
 ## Tests
@@ -97,13 +99,13 @@ handing the planner a one-shot strategy that orders that candidate first; a
 synthetic `passTurn` action maps to the planner's pass fallback. Legality stays
 authoritative in the engine — the network only scores legal continuations.
 
-## Phase 2 — belief net + importance-weighted determinization + Bayesian filtering
+## Tier-A belief-search remediation
 
-Done. `BISMCTS.run_belief(obs, BeliefEvaluator(net), n_worlds=N)` samples N
-opponent-hand worlds from the (leak-free) belief head, searches each determinized
-world with Phase-1 PUCT, and pools root statistics with importance weights.
-`search/belief_filter.ParticleFilter` sharpens the belief between turns. See
-`../lorcana-simulator/phase2/PHASE2-COMPLETION-REPORT.md`.
+`BISMCTS.run_pimc_diagnostic(...)` preserves the legacy root-pooled PIMC search
+for diagnostics only. It must not produce training labels. Belief-guided
+clean-label self-play remains blocked until the structured full-world,
+shared-tree path passes the Tier-A release gate in
+`../tier-a-belief-search-remediation-plan.md`.
 
 ## Real decks
 

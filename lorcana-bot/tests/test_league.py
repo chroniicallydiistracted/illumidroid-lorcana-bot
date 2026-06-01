@@ -163,7 +163,7 @@ def test_netplayer_vs_scripted_real_engine():
     try:
         net = LorcanaNet(d_model=32, n_layers=2)
         main = NetPlayer("main", net, SearchConfig(simulations=4, depth_limit=2),
-                         record=True, use_belief=True, n_worlds=2)
+                         record=True, use_belief=False, n_worlds=2)
         opp = ScriptedPlayer("anchor", "best")
         res = play_match(eng, {SEAT_ONE: main, SEAT_TWO: opp}, seed="smoke",
                          max_steps=200)

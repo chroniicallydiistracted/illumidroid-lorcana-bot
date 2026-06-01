@@ -18,11 +18,15 @@ import time
 
 import numpy as np
 
+from training.tier_a_guard import require_tier_a_clean_label_belief_training_ready
+
 
 def _worker(cfg: dict, q) -> None:
     wid = cfg["wid"]
     sims = decs = games = 0
     try:
+        require_tier_a_clean_label_belief_training_ready(
+            use_belief=bool(cfg["use_belief"]), context="training.parallel._worker")
         import sys
         sys.path.insert(0, cfg["bot_root"])
         import torch
@@ -32,8 +36,7 @@ def _worker(cfg: dict, q) -> None:
                                            game_fingerprint, stuck_step)
         from network.model import LorcanaNet
         from search.ismcts import BISMCTS, SearchConfig
-        from search.evaluator import NetEvaluator, BeliefEvaluator
-        from search.belief_filter import BeliefTracker
+        from search.evaluator import NetEvaluator
         from training.trace import DecisionTracer, GameLogger
 
         ck = torch.load(cfg["ckpt"], map_location="cpu")
@@ -44,7 +47,6 @@ def _worker(cfg: dict, q) -> None:
         sc = SearchConfig(simulations=cfg["sims"], depth_limit=cfg.get("depth", 10), temperature=1.0,
                           dirichlet_eps=0.25, batch_size=cfg["batch"])
         use_belief, n_worlds = cfg["use_belief"], cfg["n_worlds"]
-        full_ismcts = cfg.get("full_ismcts", False)
         per = sc.simulations * (n_worlds if use_belief else 1)
         tracer = DecisionTracer(cfg.get("trace_dir", ""), f"r{cfg.get('round', 0)}-w{wid}",
                                 enabled=cfg.get("trace", False))
@@ -58,13 +60,11 @@ def _worker(cfg: dict, q) -> None:
         with LorcanaEngine(timeout=300) as engine:
             deck_ids = [d["id"] for d in engine.list_decks()]
             mcts = BISMCTS(engine, NetEvaluator(net), sc, rng)
-            belief = BeliefEvaluator(net) if use_belief else None
             for g in range(cfg["games"]):
                 i, j = rng.choice(len(deck_ids), 2, replace=False)
                 p1, p2 = deck_ids[int(i)], deck_ids[int(j)]
                 obs = engine.reset(f"{cfg['seed']}-{g}", p1, p2)
                 glog.game_start(f"{cfg['seed']}-{g}", p1, p2)
-                trackers: dict = {}     # #4: one persistent SIR tracker PER SEAT
                 pending = []
                 steps = 0
                 stuck = same = 0
@@ -76,13 +76,7 @@ def _worker(cfg: dict, q) -> None:
                     if not legal:
                         break
                     if use_belief:
-                        tracker = trackers.setdefault(obs.get("self"), BeliefTracker(rng=rng))
-                        if full_ismcts:
-                            res = mcts.run_infoset(obs, belief, tracker,
-                                                   total_simulations=sc.simulations * n_worlds)
-                        else:
-                            res = mcts.run_belief(obs, belief, n_worlds=n_worlds,
-                                                  sims_per_world=sc.simulations, tracker=tracker)
+                        raise AssertionError("Tier-A guard must block belief-guided sample writing")
                     else:
                         res = mcts.run(obs)
                     dec_obs, dec_actor = obs, actor
@@ -148,6 +142,9 @@ def generate_round_parallel(ckpt_path: str, n_actors: int, worker_cfg: dict,
     monotonic cumulative totals across previous rounds (for live rate display);
     `base_buffer` is the persistent ReplayBuffer size so the live `buffer` figure
     reflects the cumulative buffer, not just this round's fresh samples."""
+    require_tier_a_clean_label_belief_training_ready(
+        use_belief=bool(worker_cfg["use_belief"]),
+        context="training.parallel.generate_round_parallel")
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     procs = []

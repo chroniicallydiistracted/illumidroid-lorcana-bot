@@ -29,6 +29,7 @@ from training.learner import Learner, ReplayBuffer
 from training.league import League, NetPlayer, ScriptedPlayer, frozen_net_copy, SEAT_ONE, SEAT_TWO
 from training.match import play_match
 from training.exploitability import gauntlet, exploitability_proxy, deck_pair
+from training.tier_a_guard import require_tier_a_clean_label_belief_training_ready
 
 
 def build_main_net(init: str, d_model: int, layers: int):
@@ -47,6 +48,8 @@ def run_league(init: str = "", iterations: int = 3, games_per_iter: int = 6,
                c_kl: float = 0.5, c_entropy: float = 0.01, use_belief: bool = True,
                run_exploit: bool = False, out: str = "lorcana-bot/checkpoints/league.pt",
                verbose: bool = True) -> dict:
+    require_tier_a_clean_label_belief_training_ready(
+        use_belief=use_belief, context="training.league_train.run_league")
     rng = np.random.default_rng(0)
     net, d_model, layers = build_main_net(init, d_model, layers)
     learner = Learner(net, lr=1e-3, c_kl=c_kl, c_entropy=c_entropy)

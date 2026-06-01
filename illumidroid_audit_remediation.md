@@ -20,8 +20,10 @@ Verification: fast 22/22, engine 24/24.
 
 ## Tier A — belief-search correctness — ~~FIXED (with tests)~~ *UPDATE: NOT IMPLEMENTED END-TO-END*
 
-Completed end-to-end (`illumidroid_full_ismcts_implementation_spec.md` is the #2 spec).
-Suite: **64 passed** (was 44; +20 Tier-A tests).
+The earlier completion claim was disproven by the follow-up audit.
+`illumidroid_full_ismcts_implementation_spec.md` remains the #2 design spec.
+Phase 0 of `tier-a-belief-search-remediation-plan.md` is now implemented:
+belief-guided clean-label training fails closed while the remaining fixes land.
 
 | # | Finding | Fix | Tests |
 |---|---|---|---|
@@ -36,8 +38,8 @@ over-valuation) and end-to-end against the real engine (transposition hits >0, 0
 sims, root restored, history un-polluted). It is **root-sampled shared-tree ISMCTS** — NOT
 yet the optional opponent-perspective *re-determinization* hardening (§15, separate
 experiment), and the lane driver is one IPC/transition (the batched `begin/step/drop_ismcts`
-RPC optimization, §9/§16, is deferred — so `run_belief` PIMC remains the throughput default
-and `--full-ismcts` is opt-in until lanes are batched). The info-set key is computed
+RPC optimization, §9/§16, is deferred. Legacy PIMC now remains available only as
+`run_pimc_diagnostic()` and cannot write belief-guided training labels. The info-set key is computed
 leak-free in Python from the filtered obs (server-side key + per-observer history projection,
 §6.3, is a later refinement).
 
@@ -109,16 +111,13 @@ python -m compileall -q engine network search training tests
 - **#17 lock dependencies** (SMALL): pin exact versions in `requirements.txt`/`pyproject.toml`.
 
 ## Training guidance
-The legality blocker (#1) AND the Tier-A search-quality items (#5 exact importance
-weights, #4 per-seat trackers + action-likelihood, #2 full shared-tree ISMCTS) are
-now fixed + tested, so search-derived labels are neither hidden-info-contaminated nor
-strategy-fusion-biased. Training can resume:
-- **Throughput default** (`run_belief` PIMC) is still the fast path; it now benefits
-  from #5 (exact ρ) and #4 (per-seat persistent belief).
-- **`--full-ismcts`** runs the strategy-fusion-free shared-tree search; it is
-  correctness-first (~1 IPC/transition), so expect lower games/h until the batched
-  lane RPC (§9/§16) lands. Use it for strength/eval runs and to validate that the
-  PIMC default isn't being misled on a given matchup.
+Belief-guided clean-label training is blocked while Tier-A remediation is in
+progress. The legacy root-pooled PIMC path is now diagnostic-only as
+`run_pimc_diagnostic()`. Non-belief diagnostics may continue with `--no-belief`,
+but do not use them as evidence that Tier-A belief-search labels are clean.
+
+Resume belief-guided clean-label self-play only after the release gate in
+`tier-a-belief-search-remediation-plan.md` passes.
 Remaining before "competition-promotable": Tier B (real held-out promotion gate #11,
 league parity #7, provenance/resume #10) — a checkpoint is not champion-level until a
 real evaluation gate exists. Tier C/D are representation/engine depth.

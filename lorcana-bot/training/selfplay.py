@@ -16,21 +16,25 @@ import numpy as np
 from engine.bridge import LorcanaEngine
 from engine.serialization import encode_obs, encode_belief
 from search.ismcts import BISMCTS, SearchConfig
-from search.evaluator import NetEvaluator, BeliefEvaluator
+from search.evaluator import NetEvaluator
 from training.learner import Sample, ReplayBuffer, Learner
+from training.tier_a_guard import require_tier_a_clean_label_belief_training_ready
 
 
 def play_game(engine: LorcanaEngine, net, cfg: SearchConfig, seed: str,
               max_steps: int = 400, rng: np.random.Generator | None = None,
               use_belief: bool = True, n_worlds: int = 6,
               deck_p1: str | None = None, deck_p2: str | None = None) -> list[Sample]:
-    """Self-play one game with B-ISMCTS. With `use_belief`, each decision uses
-    belief-sampled importance-weighted determinization (Phase 2); otherwise the
-    Phase-1 single-world search. Logs (I, π_MCTS, z, belief target)."""
+    """Self-play one game and return training targets.
+
+    Belief-guided label generation is blocked until the Tier-A release gate passes.
+    Non-belief runs continue to use the Phase-1 single-world search.
+    """
+    require_tier_a_clean_label_belief_training_ready(
+        use_belief=use_belief, context="training.selfplay.play_game")
     rng = rng or np.random.default_rng()
     evaluator = NetEvaluator(net)
     mcts = BISMCTS(engine, evaluator, cfg, rng)
-    belief_eval = BeliefEvaluator(net) if use_belief else None
     obs = engine.reset(seed, deck_p1, deck_p2)
     pending: list[tuple[dict, np.ndarray, str, dict]] = []
     steps = 0
@@ -40,8 +44,7 @@ def play_game(engine: LorcanaEngine, net, cfg: SearchConfig, seed: str,
         if not legal:
             break
         if use_belief:
-            res = mcts.run_belief(obs, belief_eval, n_worlds=n_worlds,
-                                  sims_per_world=cfg.simulations)
+            raise AssertionError("Tier-A guard must block belief-guided sample writing")
         else:
             res = mcts.run(obs)  # leaves the engine on the root decision state
         if actor is not None and len(res.pi) == len(legal):
@@ -62,7 +65,10 @@ def play_game(engine: LorcanaEngine, net, cfg: SearchConfig, seed: str,
 
 def run_iteration(net, cfg: SearchConfig, n_games: int, seed_prefix: str,
                   learner: Learner, buffer: ReplayBuffer, epochs: int = 1,
-                  batch_size: int = 64, verbose: bool = True) -> dict:
+                  batch_size: int = 64, verbose: bool = True,
+                  use_belief: bool = True) -> dict:
+    require_tier_a_clean_label_belief_training_ready(
+        use_belief=use_belief, context="training.selfplay.run_iteration")
     rng = np.random.default_rng()
     import random
     pair_rng = random.Random(seed_prefix)
@@ -73,7 +79,7 @@ def run_iteration(net, cfg: SearchConfig, n_games: int, seed_prefix: str,
             if len(deck_ids) >= 2:
                 p1, p2 = pair_rng.sample(deck_ids, 2)
             samples = play_game(engine, net, cfg, f"{seed_prefix}-{g}", rng=rng,
-                                deck_p1=p1, deck_p2=p2)
+                                deck_p1=p1, deck_p2=p2, use_belief=use_belief)
             buffer.extend(samples)
             if verbose:
                 tag = f" [{p1} vs {p2}]" if p1 else ""
@@ -98,8 +104,12 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=6)
     ap.add_argument("--d-model", type=int, default=128)
     ap.add_argument("--layers", type=int, default=3)
+    ap.add_argument("--no-belief", action="store_true")
     ap.add_argument("--out", type=str, default="lorcana-bot/checkpoints/selfplay.pt")
     args = ap.parse_args()
+    use_belief = not args.no_belief
+    require_tier_a_clean_label_belief_training_ready(
+        use_belief=use_belief, context="training.selfplay.main")
 
     d_model, layers = args.d_model, args.layers
     if args.init and os.path.exists(args.init):
@@ -116,7 +126,8 @@ def main() -> None:
     cfg = SearchConfig(simulations=args.sims, depth_limit=args.depth,
                        dirichlet_eps=0.25, temperature=1.0)
     for it in range(args.iterations):
-        stats = run_iteration(net, cfg, args.games, f"sp{it}", learner, buffer)
+        stats = run_iteration(net, cfg, args.games, f"sp{it}", learner, buffer,
+                              use_belief=use_belief)
         print(f"[selfplay] iter {it+1}/{args.iterations}: "
               f"loss={stats.get('loss',0):.4f} policy={stats.get('policy',0):.4f} "
               f"value={stats.get('value',0):.4f}", flush=True)

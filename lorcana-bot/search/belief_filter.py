@@ -113,7 +113,7 @@ class BeliefTracker:
         resample (SIR) — conditioning on accumulated public evidence, so the
         determinization worlds are temporally coherent instead of i.i.d. each ply.
     `worlds()` returns determinization worlds drawn from the maintained particle
-    set for `run_belief`. (Basic SIR; full action-likelihood ReBeL is future.)
+    set for diagnostic PIMC. (Basic SIR; full action-likelihood ReBeL is future.)
     """
 
     def __init__(self, n_particles: int = 64, ess_threshold: float = 0.5,

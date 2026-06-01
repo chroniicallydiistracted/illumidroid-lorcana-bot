@@ -50,14 +50,14 @@ def test_determinize_repartitions_and_restores(midgame):
     assert [a["stableKey"] for a in back["legal"]] == before_keys
 
 
-def test_run_belief_pools_and_restores(midgame):
+def test_run_pimc_diagnostic_pools_and_restores(midgame):
     eng, obs = midgame
     if obs["done"]:
         pytest.skip("ended")
     net = LorcanaNet(d_model=32, n_layers=2)
     mcts = BISMCTS(eng, NetEvaluator(net), SearchConfig(simulations=6, depth_limit=3))
     before = [a["stableKey"] for a in obs["legal"]]
-    res = mcts.run_belief(obs, BeliefEvaluator(net), n_worlds=4, sims_per_world=5)
+    res = mcts.run_pimc_diagnostic(obs, BeliefEvaluator(net), n_worlds=4, sims_per_world=5)
     assert len(res.pi) == len(obs["legal"])
     assert res.pi.sum() == pytest.approx(1.0, abs=1e-4)
     assert res.stats["pooled_worlds"] >= 1

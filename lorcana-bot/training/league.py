@@ -18,6 +18,7 @@ import numpy as np
 from engine.serialization import encode_obs, encode_belief
 from search.ismcts import BISMCTS, SearchConfig
 from search.evaluator import NetEvaluator, BeliefEvaluator
+from training.tier_a_guard import require_tier_a_clean_label_belief_training_ready
 
 SEAT_ONE = "player_one"
 SEAT_TWO = "player_two"
@@ -52,12 +53,15 @@ class ScriptedPlayer(Player):
 
 class NetPlayer(Player):
     """A neural agent acting via B-ISMCTS (Phase 1 `run` or Phase 2
-    `run_belief`). Records (I, π_MCTS, belief, actor) when `record` is set."""
+    diagnostic PIMC). Records (I, π_MCTS, belief, actor) when `record` is set."""
 
     def __init__(self, player_id: str, net, cfg: SearchConfig | None = None,
                  record: bool = False, use_belief: bool = True, n_worlds: int = 6,
                  greedy: bool = False, rng: np.random.Generator | None = None) -> None:
         super().__init__(player_id, record=record)
+        require_tier_a_clean_label_belief_training_ready(
+            use_belief=bool(record and use_belief),
+            context=f"training.league.NetPlayer({player_id!r})")
         self.net = net
         self.cfg = cfg or SearchConfig(simulations=16, depth_limit=4)
         self.use_belief = use_belief
@@ -66,12 +70,16 @@ class NetPlayer(Player):
         self.rng = rng or np.random.default_rng()
 
     def act(self, engine, obs: dict) -> tuple[dict, Raw | None]:
+        require_tier_a_clean_label_belief_training_ready(
+            use_belief=bool(self.record and self.use_belief),
+            context=f"training.league.NetPlayer.act({self.id!r})")
         legal = obs.get("legal", [])
         actor = obs.get("actor")
         mcts = BISMCTS(engine, NetEvaluator(self.net), self.cfg, self.rng)
         if self.use_belief:
-            res = mcts.run_belief(obs, BeliefEvaluator(self.net), n_worlds=self.n_worlds,
-                                  sims_per_world=self.cfg.simulations)
+            res = mcts.run_pimc_diagnostic(obs, BeliefEvaluator(self.net),
+                                           n_worlds=self.n_worlds,
+                                           sims_per_world=self.cfg.simulations)
         else:
             res = mcts.run(obs)
         if res.pi.sum() <= 0:
