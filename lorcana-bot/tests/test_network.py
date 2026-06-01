@@ -64,6 +64,47 @@ def test_forward_and_masking():
     assert np.allclose(priors.sum(axis=1), 1.0, atol=1e-4)
 
 
+def test_candidates_sharing_family_src_target_get_distinct_logits():
+    """ACE key property: candidates that share family + source + FIRST target but
+    differ in singer / 2nd target / named card / cost type / optional must receive
+    DISTINCT policy logits. The old (cat,src,tgt) head collapsed these to identical
+    features; the candidate transformer must separate them."""
+    cards = [{
+        "id": f"c{i}", "owner": 0, "zone": "play" if i else "hand",
+        "cardType": "character", "cost": i, "strength": 2, "willpower": 3,
+        "lore": 1, "damage": 0, "exerted": False, "drying": False, "ready": True,
+        "keywords": [], "definitionId": f"def-{i}", "hidden": False,
+    } for i in range(5)]
+    # every candidate: family=playCard, src=c0, first target=c1 — identical to the
+    # old head. They differ ONLY in a field the old head could not see.
+    legal = [
+        {"family": "playCard", "src": "c0", "tgt": "c1", "targets": ["c1"], "costType": "standard"},
+        {"family": "playCard", "src": "c0", "tgt": "c1", "targets": ["c1"], "costType": "sing",
+         "singers": ["c2"]},                                   # differs: sing + singer
+        {"family": "playCard", "src": "c0", "tgt": "c1", "targets": ["c1"], "costType": "standard",
+         "namedCard": "Some Named Card"},                      # differs: named card
+        {"family": "playCard", "src": "c0", "tgt": "c1", "targets": ["c1", "c3"],
+         "costType": "standard"},                              # differs: 2nd target
+        {"family": "playCard", "src": "c0", "tgt": "c1", "targets": ["c1"], "costType": "standard",
+         "resolveOptional": True},                             # differs: optional
+    ]
+    obs = {"turn": 3, "phase": "main", "status": "playing", "done": False, "forced": False,
+           "actor": "player_one",
+           "players": {"self": {"lore": 2, "handCount": 4, "deckCount": 50, "inkwell": 3,
+                                "discard": 0, "play": 4},
+                       "opp": {"lore": 1, "handCount": 5, "deckCount": 52, "inkwell": 2,
+                               "discard": 0, "play": 0}},
+           "cards": cards, "legal": legal}
+    net = LorcanaNet(d_model=32, n_layers=2)
+    net.eval()
+    batch = collate([encode_obs(obs)])
+    logits = net.forward({k: torch.as_tensor(v) for k, v in batch.items()})["policy_logits"][0]
+    # all five candidates must get distinct scores (no two collapse together)
+    for i in range(len(legal)):
+        for j in range(i + 1, len(legal)):
+            assert abs(float(logits[i] - logits[j])) > 1e-4, f"candidates {i},{j} collapsed"
+
+
 def test_two_hot_roundtrip():
     net = LorcanaNet(d_model=16, n_layers=1)
     z = torch.tensor([1.0, -1.0, 0.0, 0.5])

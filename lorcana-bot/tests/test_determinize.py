@@ -69,3 +69,39 @@ def test_particle_filter_resample_preserves_count_and_lifts_ess():
     assert ran
     assert len(pf.particles) == 200
     assert pf.ess() > ess_before                    # weights uniform after SIR
+
+
+def test_importance_weighting_belief_inert_uniform_reweights():
+    # #12 PROOF: belief proposal -> rho == 1 (inert by design; samples already
+    # belief-distributed). uniform proposal -> rho varies AND correlates with the
+    # belief (worlds holding high-prob cards get more weight).
+    pool = [f"c{i}" for i in range(8)]
+    probs = np.array([0.95, 0.9, 0.85, 0.05, 0.05, 0.05, 0.05, 0.05])
+    bel = sample_worlds(pool, probs, 3, 200, "belief", np.random.default_rng(3))
+    assert np.allclose([w.weight for w in bel], 1.0, atol=1e-9)   # ρ == 1 exactly
+    uni = sample_worlds(pool, probs, 3, 400, "uniform", np.random.default_rng(4))
+    w = np.array([x.weight for x in uni])
+    assert w.std() > 1e-3                                          # ρ varies
+    hi = {"c0", "c1", "c2"}
+    n_hi = np.array([len(hi & set(x.hand_ids)) for x in uni])      # high-prob cards held
+    assert np.corrcoef(n_hi, w)[0, 1] > 0.2                        # ρ tracks belief
+    # worlds richer in high-belief cards carry strictly more weight on average
+    assert w[n_hi >= 2].mean() > w[n_hi <= 1].mean()
+
+
+def test_belief_tracker_seeds_reweights_reseeds():
+    # #9 PROOF: BeliefTracker maintains a persistent SIR filter across decisions,
+    # reseeds when the opponent's pool changes, reweights+resamples otherwise.
+    from search.belief_filter import BeliefTracker
+    pool = [f"c{i}" for i in range(10)]
+    probs = np.array([0.8, 0.8, 0.8] + [0.06] * 7)
+    t = BeliefTracker(n_particles=200, rng=np.random.default_rng(0))
+    w1 = t.worlds(pool, probs, 3, 8)
+    assert len(w1) == 8 and t.reseeds == 1 and t.updates == 0      # first decision -> seed
+    assert t.pf is not None and abs(t.pf.marginal_vector().sum() - 3) < 0.6
+    # same pool next decision -> reweight + resample (no reseed)
+    t.worlds(pool, probs, 3, 8)
+    assert t.reseeds == 1 and t.updates == 1
+    # opponent revealed a card (pool shrinks) -> reseed
+    t.worlds(pool[1:], probs[1:], 3, 8)
+    assert t.reseeds == 2

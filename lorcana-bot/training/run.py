@@ -4,8 +4,11 @@ belief-guided self-play + a live monitor + periodic eval — one command.
     python lorcana-bot/training/run.py            # sensible defaults (~13M net)
     python lorcana-bot/training/run.py --help
 
-Runs single-process (one Bun engine, net on GPU) so the GPU is actually used for
-both batched leaf inference and the learner. Ctrl-C saves and exits cleanly.
+Parallel by default (`--actors > 1`): spawn-isolated CPU workers (training/parallel)
+run batched belief self-play and stream samples to the GPU learner here in the
+main process. `--actors 1` runs everything single-process. Ctrl-C saves cleanly.
+This is the throughput-oriented self-play trainer; `training/league_train.py` is
+the Phase-3 PFSP/league trainer (`./train.sh league ...`).
 """
 
 from __future__ import annotations
@@ -29,8 +32,10 @@ from engine.serialization import encode_obs, encode_belief
 from network.model import LorcanaNet
 from search.ismcts import BISMCTS, SearchConfig
 from search.evaluator import NetEvaluator, BeliefEvaluator
+from search.belief_filter import BeliefTracker
 from training.learner import Learner, ReplayBuffer, Sample
 from training.monitor import LiveMonitor
+from training.trace import DecisionTracer
 from training.exploitability import deck_pair, gauntlet
 from training.league import NetPlayer, ScriptedPlayer
 
@@ -41,9 +46,10 @@ def _outcome(winner, actor) -> float:
     return 1.0 if str(winner) == str(actor) else -1.0
 
 
-def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worlds):
+def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worlds, tracer=None):
     mcts = BISMCTS(engine, NetEvaluator(net), cfg, rng)
     belief = BeliefEvaluator(net) if use_belief else None
+    tracker = BeliefTracker(rng=rng) if use_belief else None  # persistent SIR belief
     p1, p2 = deck_pair(rng, deck_ids)
     obs = engine.reset(seed, p1, p2)
     pending: list[tuple] = []
@@ -55,15 +61,28 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
         if not legal:
             break
         if use_belief:
-            res = mcts.run_belief(obs, belief, n_worlds=n_worlds, sims_per_world=cfg.simulations)
+            res = mcts.run_belief(obs, belief, n_worlds=n_worlds,
+                                  sims_per_world=cfg.simulations, tracker=tracker)
         else:
             res = mcts.run(obs)
-        if actor is not None and len(res.pi) == len(legal):
-            pending.append((encode_obs(obs), res.pi.copy(), actor, encode_belief(obs)))
+        dec_obs, dec_actor = obs, actor
         a = int(rng.choice(len(res.pi), p=res.pi)) if res.pi.sum() > 0 else 0
-        obs = engine.step(legal[a]["stableKey"])["obs"]
+        result = engine.step(legal[a]["stableKey"])
+        obs = result["obs"]
+        if tracer is not None:
+            tracer.log(dec_obs, res, a, game_id=str(seed), executed=result)
         steps += 1
         mon.add(sims=per_decision, decisions=1)
+        # only record the sample if the engine executed exactly the chosen action
+        # (a failed/fallback execution would attach the target to a different line)
+        clean = result.get("success", True) and (
+            result.get("matched", True) or result.get("executed") == "passTurn")
+        # skip mundane decisions: a forced state or a single legal action teaches
+        # the policy nothing (the mask already determines the move) and only
+        # dilutes the buffer / biases the prior toward trivial lines.
+        trivial = len(legal) <= 1 or dec_obs.get("forced")
+        if clean and not trivial and dec_actor is not None and len(res.pi) == len(legal):
+            pending.append((encode_obs(dec_obs), res.pi.copy(), dec_actor, encode_belief(dec_obs)))
     winner = obs.get("winner")
     samples = [Sample(enc=e, pi=pi, z=_outcome(winner, ac), belief=b) for (e, pi, ac, b) in pending]
     return samples, winner, p1, p2
@@ -85,6 +104,8 @@ def main() -> None:
     ap.add_argument("--rounds", type=int, default=0, help="0 = run forever (Ctrl-C to stop)")
     ap.add_argument("--bc-games", type=int, default=6, help="fair behaviour-clone warmup games (0 to skip)")
     ap.add_argument("--eval-every", type=int, default=5, help="rounds between gauntlet evals (0 = never)")
+    ap.add_argument("--trace", action="store_true",
+                    help="write per-decision JSONL traces (candidate priors/visits/Q) to <out>/traces/")
     ap.add_argument("--out", type=str, default=os.path.join(_BOT, "checkpoints", "run.pt"))
     ap.add_argument("--device", type=str, default="auto")
     args = ap.parse_args()
@@ -121,6 +142,12 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     rng = np.random.default_rng()
     buf = ReplayBuffer()
+    trace_dir = os.path.join(os.path.dirname(args.out), "traces")
+    # single-process tracer; parallel workers each open their own (see parallel.py)
+    tracer = DecisionTracer(trace_dir, f"run{int(time.time())}",
+                            enabled=args.trace and args.actors <= 1)
+    if args.trace:
+        mon.event(f"decision tracing -> {trace_dir}/")
 
     def save_to(path):
         torch.save({"model": {k: v.cpu() for k, v in net.state_dict().items()},
@@ -148,7 +175,7 @@ def main() -> None:
                 for _ in range(4):
                     if len(buf):
                         st = learner.train_epoch(buf, batch_size=256)
-                        mon.update(loss=st.get("loss"))
+                        mon.update(loss=st.get("loss"), losses=st)
                 mon.event(f"bootstrap done: {len(buf)} samples, loss={st.get('loss', 0):.3f}")
                 save()
 
@@ -156,15 +183,19 @@ def main() -> None:
             rounds_done = 0
             while args.rounds == 0 or rounds_done < args.rounds:
                 mon.update(phase="selfplay", round=rounds_done + 1)
+                # anchor the KL trust region to the round-start policy (activates c_kl)
+                learner.set_reference()
                 if args.actors > 1:
                     # parallel: workers reload these weights, stream progress live
                     save_to(work_ckpt)
                     from training.parallel import generate_round_parallel
                     wcfg = {"bot_root": _BOT, "sims": args.sims, "batch": args.batch,
                             "n_worlds": args.n_worlds, "use_belief": use_belief,
-                            "games": args.games_per_actor}
+                            "games": args.games_per_actor,
+                            "trace": args.trace, "trace_dir": trace_dir, "round": rounds_done}
                     raw, rs, rd, rg = generate_round_parallel(work_ckpt, args.actors, wcfg,
-                                                              mon, base, rounds_done)
+                                                              mon, base, rounds_done,
+                                                              base_buffer=len(buf))
                     base["sims"] += rs; base["decisions"] += rd; base["games"] += rg
                     for (e, pi, z, b) in raw:
                         buf.add(Sample(enc=e, pi=pi, z=z, belief=b))
@@ -172,7 +203,8 @@ def main() -> None:
                 else:
                     for g in range(args.games_per_actor):
                         s, winner, p1, p2 = selfplay_game(engine, net, cfg, f"sp{rounds_done}-{g}",
-                                                          rng, mon, deck_ids, use_belief, args.n_worlds)
+                                                          rng, mon, deck_ids, use_belief, args.n_worlds,
+                                                          tracer=tracer)
                         buf.extend(s)
                         mon.add(games=1)
                         mon.update(buffer=len(buf), last=f"{p1[:12]} v {p2[:12]} -> {winner or 'draw'}")
@@ -181,7 +213,7 @@ def main() -> None:
                 for _ in range(args.epochs):
                     if len(buf):
                         st = learner.train_epoch(buf, batch_size=256)
-                mon.update(loss=st.get("loss"))
+                mon.update(loss=st.get("loss"), losses=st or None)
                 rounds_done += 1
                 save()
                 if args.eval_every and rounds_done % args.eval_every == 0:
@@ -193,12 +225,13 @@ def main() -> None:
                                ScriptedPlayer("fairAggro", "fairAggro")]
                     wr = gauntlet(engine, evalp, anchors, n_games_per=2, rng=rng,
                                   seed_prefix=f"eval{rounds_done}", deck_ids=deck_ids)
-                    mon.update(winrate=wr["_overall"])
+                    mon.update(winrate=wr["_overall"], wr_round=rounds_done)
                     mon.event(f"round {rounds_done} gauntlet vs fair anchors: "
                               f"overall {wr['_overall']:.0%} {dict((k, round(v,2)) for k,v in wr.items() if k!='_overall')}")
     except KeyboardInterrupt:
         mon.event("interrupted — saving checkpoint")
     finally:
+        tracer.close()
         save()
         mon.stop()
         print(f"\nsaved -> {args.out}", flush=True)

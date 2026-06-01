@@ -15,6 +15,9 @@ point at a learned null embedding.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from typing import Any
 
 import numpy as np
@@ -52,10 +55,30 @@ KEYWORDS = [
 KEYWORD_INDEX = {k.lower(): i for i, k in enumerate(KEYWORDS)}
 NUM_KEYWORDS = len(KEYWORDS)
 
-# definition-identity vocabulary (hashing trick). 0 = padding, 1 = hidden/unknown.
-VOCAB_SIZE = 4096
+# definition-identity vocabulary. 0 = padding, 1 = hidden/unknown.
+#
+# We use a COMPACT, CONTIGUOUS map over the exact card universe that appears in
+# the deck pool (`engine/card_vocab.json`, built by `engine.build_vocab`): the 25
+# real decks contain only ~155 distinct cards, so a 32768-row hash table wasted
+# ~99.5% of its rows AND starved each card's embedding of gradient updates. Known
+# cards get a dedicated, collision-free row (2 .. 1+K); a small OOV band absorbs
+# anything outside the pool via a process-stable hash (blake2b, NOT builtin hash()
+# which is PYTHONHASHSEED-salted). The file is committed so every spawned worker
+# and the learner agree on the same ids (determinism).
 PAD_ID = 0
 HIDDEN_ID = 1
+_OOV_BUCKETS = 256
+
+_VOCAB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "card_vocab.json")
+try:
+    with open(_VOCAB_PATH) as _f:
+        _CARD_MAP: dict[str, int] = json.load(_f)["map"]
+except (OSError, ValueError, KeyError):
+    _CARD_MAP = {}                       # fall back to pure-hash if not yet built
+
+_KNOWN = len(_CARD_MAP)
+_OOV_BASE = 2 + _KNOWN
+VOCAB_SIZE = _OOV_BASE + _OOV_BUCKETS    # embedding row count (trunk reads this)
 
 # per-card feature layout
 CARD_FEATURE_DIM = (
@@ -75,12 +98,44 @@ GLOBAL_FEATURE_DIM = (
     + 1          # n legal (scaled)
 )
 
+# --- rich action-candidate descriptor (ACE) ----------------------------------
+# Each legal candidate is encoded as (a) a scalar/categorical feature vector and
+# (b) a set of role-tagged pointers into the card-token set, so the candidate
+# transformer can distinguish actions that share family/src/first-target but
+# differ in singer / shift target / 2nd target / named card / banish-discard-
+# exert cost / destination / optional / choice-index.
+COST_TYPES = ["none", "standard", "free", "shift", "sing"]
+COST_TYPE_INDEX = {t: i for i, t in enumerate(COST_TYPES)}
+DEST_ZONES = ["deck", "hand", "play", "inkwell", "discard"]
+DEST_ZONE_INDEX = {z: i for i, z in enumerate(DEST_ZONES)}
+
+# token roles (0 = pad). The named-card token is handled separately (cand_named_id).
+NUM_ROLES = 8
+ROLE_SRC, ROLE_TGT, ROLE_SINGER, ROLE_BANISH, ROLE_DISCARD, ROLE_EXERT, ROLE_SHIFT = 1, 2, 3, 4, 5, 6, 7
+_CAND_CAP = {"targets": 4, "singers": 3, "banish": 2, "discard": 2, "exert": 2}
+CAND_TOK_MAX = 16          # 1 src + 4 tgt + 3 singer + 1 shift + 2 banish + 2 discard + 2 exert
+CAND_FEAT_DIM = (
+    len(COST_TYPES)        # cost-type one-hot
+    + 1                    # ink cost (scaled)
+    + 1                    # choiceIndex (scaled)
+    + 1                    # resolveOptional
+    + 1                    # abilityIndex (scaled)
+    + 1                    # has named card
+    + len(DEST_ZONES)      # destination zones (multi-hot)
+    + 3                    # arity counts: n_targets, n_singers, n_costcards (scaled)
+)
+
 
 def vocab_id(definition_id: Any, hidden: bool) -> int:
     if hidden or definition_id is None:
         return HIDDEN_ID
-    h = hash(str(definition_id)) % (VOCAB_SIZE - 2)
-    return h + 2  # avoid PAD_ID / HIDDEN_ID
+    key = str(definition_id)
+    idx = _CARD_MAP.get(key)
+    if idx is not None:
+        return 2 + idx                   # dedicated, collision-free row
+    # outside the known pool -> stable hash into the small OOV band.
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return _OOV_BASE + int.from_bytes(digest, "big") % _OOV_BUCKETS
 
 
 def _scale(x: float, denom: float) -> float:
@@ -132,6 +187,54 @@ def encode_globals(obs: dict) -> np.ndarray:
     return g
 
 
+def _encode_candidate(act: dict, pos_of: dict[str, int]):
+    """One legal candidate -> (feat [CAND_FEAT_DIM], tok_pos/tok_role/tok_mask
+    [CAND_TOK_MAX], named_id). Pointers index the card-token set (0 = NULL)."""
+    f = np.zeros(CAND_FEAT_DIM, dtype=np.float32)
+    i = 0
+    ct = COST_TYPE_INDEX.get(act.get("costType", "none"), 0)
+    f[i + ct] = 1.0
+    i += len(COST_TYPES)
+    f[i] = _scale(max(int(act.get("inkCost", -1)), -1) + 1, 10.0); i += 1
+    f[i] = _scale(max(int(act.get("choice", -1)), -1) + 1, 8.0);   i += 1
+    f[i] = 1.0 if act.get("resolveOptional") else 0.0;             i += 1
+    f[i] = _scale(max(int(act.get("abilityIndex", -1)), -1) + 1, 8.0); i += 1
+    f[i] = 1.0 if act.get("namedCard") else 0.0;                   i += 1
+    for z in act.get("destinationZones", []) or []:
+        zi = DEST_ZONE_INDEX.get(z)
+        if zi is not None:
+            f[i + zi] = 1.0
+    i += len(DEST_ZONES)
+    tgts = act.get("targets", []) or []
+    sing = act.get("singers", []) or []
+    banish, discard, exert = (act.get("banish") or [], act.get("discard") or [], act.get("exert") or [])
+    f[i] = _scale(len(tgts), 4.0)
+    f[i + 1] = _scale(len(sing), 3.0)
+    f[i + 2] = _scale(len(banish) + len(discard) + len(exert), 4.0)
+
+    toks: list[tuple[str, int]] = []
+    if act.get("src"):
+        toks.append((act["src"], ROLE_SRC))
+    toks += [(x, ROLE_TGT) for x in tgts[: _CAND_CAP["targets"]]]
+    toks += [(x, ROLE_SINGER) for x in sing[: _CAND_CAP["singers"]]]
+    if act.get("shiftTarget"):
+        toks.append((act["shiftTarget"], ROLE_SHIFT))
+    toks += [(x, ROLE_BANISH) for x in banish[: _CAND_CAP["banish"]]]
+    toks += [(x, ROLE_DISCARD) for x in discard[: _CAND_CAP["discard"]]]
+    toks += [(x, ROLE_EXERT) for x in exert[: _CAND_CAP["exert"]]]
+
+    tok_pos = np.zeros(CAND_TOK_MAX, dtype=np.int64)
+    tok_role = np.zeros(CAND_TOK_MAX, dtype=np.int64)
+    tok_mask = np.zeros(CAND_TOK_MAX, dtype=bool)
+    for k, (cid, role) in enumerate(toks[:CAND_TOK_MAX]):
+        tok_pos[k] = pos_of.get(str(cid), 0)
+        tok_role[k] = role
+        tok_mask[k] = True
+    nm = act.get("namedCard")
+    named_id = vocab_id(nm, hidden=False) if nm else 0
+    return f, tok_pos, tok_role, tok_mask, named_id
+
+
 def encode_obs(obs: dict) -> dict[str, np.ndarray]:
     """Single observation -> dict of numpy arrays (unbatched)."""
     cards = obs.get("cards", [])
@@ -149,18 +252,40 @@ def encode_obs(obs: dict) -> dict[str, np.ndarray]:
     cat_idx = np.zeros(a, dtype=np.int64)
     src_pos = np.zeros(a, dtype=np.int64)
     tgt_pos = np.zeros(a, dtype=np.int64)
+    tgt2_pos = np.zeros(a, dtype=np.int64)
+    choice = np.zeros(a, dtype=np.float32)
+    cand_feats = np.zeros((a, CAND_FEAT_DIM), dtype=np.float32)
+    cand_tok_pos = np.zeros((a, CAND_TOK_MAX), dtype=np.int64)
+    cand_tok_role = np.zeros((a, CAND_TOK_MAX), dtype=np.int64)
+    cand_tok_mask = np.zeros((a, CAND_TOK_MAX), dtype=bool)
+    cand_named_id = np.zeros(a, dtype=np.int64)
     for j, act in enumerate(legal):
         cat_idx[j] = CATEGORY_INDEX.get(act.get("family", ""), 0)
         src_pos[j] = pos_of.get(str(act.get("src")), 0)
         tgt_pos[j] = pos_of.get(str(act.get("tgt")), 0)
+        tgt2_pos[j] = pos_of.get(str(act.get("tgt2")), 0)   # 2nd target (0 = null)
+        choice[j] = _scale(max(int(act.get("choice", -1)), -1) + 1, 8.0)  # modal choiceIndex
+        f, tp, tr, tm, nid = _encode_candidate(act, pos_of)
+        cand_feats[j] = f
+        cand_tok_pos[j] = tp
+        cand_tok_role[j] = tr
+        cand_tok_mask[j] = tm
+        cand_named_id[j] = nid
 
     return {
         "card_feats": card_feats,           # [N, Fc]
         "card_ids": card_ids,               # [N]
         "globals": encode_globals(obs),     # [G]
         "action_cat": cat_idx,              # [A]
-        "action_src": src_pos,              # [A] (0 = null)
-        "action_tgt": tgt_pos,              # [A] (0 = null)
+        "action_src": src_pos,              # [A] (0 = null)  (legacy)
+        "action_tgt": tgt_pos,              # [A] (0 = null)  (legacy)
+        "action_tgt2": tgt2_pos,            # [A] (0 = null)  (legacy)
+        "action_choice": choice,            # [A] (legacy)
+        "cand_feats": cand_feats,           # [A, CAND_FEAT_DIM]
+        "cand_tok_pos": cand_tok_pos,       # [A, CAND_TOK_MAX] (pointers, 0 = null)
+        "cand_tok_role": cand_tok_role,     # [A, CAND_TOK_MAX] (role ids, 0 = pad)
+        "cand_tok_mask": cand_tok_mask,     # [A, CAND_TOK_MAX] (bool)
+        "cand_named_id": cand_named_id,     # [A] (named-card vocab id, 0 = none)
         "n_cards": np.int64(n),
         "n_actions": np.int64(a),
     }
@@ -178,17 +303,26 @@ def encode_belief(obs: dict) -> dict[str, np.ndarray]:
     hidden = obs.get("hidden") or {}
     hand = hidden.get("hand", []) or []
     deck = hidden.get("deck", []) or []
-    pool = [(c, 1.0) for c in hand] + [(c, 0.0) for c in deck]
+    ink = hidden.get("inkwell", []) or []
+    # pool = ALL hidden opponent cards; two targets per card: in_hand, in_inkwell
+    # (in_deck = neither). Inkwell identity is hidden+strategically important.
+    pool = ([(c, 1.0, 0.0) for c in hand]
+            + [(c, 0.0, 0.0) for c in deck]
+            + [(c, 0.0, 1.0) for c in ink])
     p = len(pool)
     bel_ids = np.zeros(p, dtype=np.int64)
-    bel_label = np.zeros(p, dtype=np.float32)
-    for i, (c, lab) in enumerate(pool):
+    bel_label = np.zeros(p, dtype=np.float32)       # in opp hand
+    bel_label_ink = np.zeros(p, dtype=np.float32)   # in opp inkwell
+    for i, (c, lab, lab_ink) in enumerate(pool):
         bel_ids[i] = vocab_id(c.get("def"), hidden=False)  # identity is known (conditioning)
         bel_label[i] = lab
+        bel_label_ink[i] = lab_ink
     return {
-        "belief_ids": bel_ids,                  # [P]
-        "belief_label": bel_label,              # [P] (1 = currently in opp hand)
+        "belief_ids": bel_ids,                       # [P]
+        "belief_label": bel_label,                   # [P] (1 = in opp hand)
+        "belief_label_ink": bel_label_ink,           # [P] (1 = in opp inkwell)
         "belief_handcount": np.int64(int(bel_label.sum())),
+        "belief_inkcount": np.int64(int(bel_label_ink.sum())),
         "n_pool": np.int64(p),
     }
 
@@ -200,20 +334,26 @@ def collate_belief(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     max_p = max(max_p, 1)
     bel_ids = np.zeros((B, max_p), dtype=np.int64)
     bel_label = np.zeros((B, max_p), dtype=np.float32)
+    bel_label_ink = np.zeros((B, max_p), dtype=np.float32)
     bel_mask = np.zeros((B, max_p), dtype=bool)
     handcount = np.zeros(B, dtype=np.float32)
+    inkcount = np.zeros(B, dtype=np.float32)
     for i, b in enumerate(batch):
         p = int(b["n_pool"])
         if p:
             bel_ids[i, :p] = b["belief_ids"]
             bel_label[i, :p] = b["belief_label"]
+            bel_label_ink[i, :p] = b.get("belief_label_ink", np.zeros(p, np.float32))
             bel_mask[i, :p] = True
         handcount[i] = float(b["belief_handcount"])
+        inkcount[i] = float(b.get("belief_inkcount", 0))
     return {
         "belief_ids": bel_ids,
         "belief_label": bel_label,
+        "belief_label_ink": bel_label_ink,
         "belief_mask": bel_mask,
         "belief_handcount": handcount,
+        "belief_inkcount": inkcount,
     }
 
 
@@ -232,7 +372,14 @@ def collate(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     action_cat = np.zeros((B, max_a), dtype=np.int64)
     action_src = np.zeros((B, max_a), dtype=np.int64)
     action_tgt = np.zeros((B, max_a), dtype=np.int64)
+    action_tgt2 = np.zeros((B, max_a), dtype=np.int64)
+    action_choice = np.zeros((B, max_a), dtype=np.float32)
     action_mask = np.zeros((B, max_a), dtype=bool)
+    cand_feats = np.zeros((B, max_a, CAND_FEAT_DIM), dtype=np.float32)
+    cand_tok_pos = np.zeros((B, max_a, CAND_TOK_MAX), dtype=np.int64)
+    cand_tok_role = np.zeros((B, max_a, CAND_TOK_MAX), dtype=np.int64)
+    cand_tok_mask = np.zeros((B, max_a, CAND_TOK_MAX), dtype=bool)
+    cand_named_id = np.zeros((B, max_a), dtype=np.int64)
 
     for i, b in enumerate(batch):
         n = int(b["n_cards"])
@@ -246,7 +393,15 @@ def collate(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
             action_cat[i, :a] = b["action_cat"]
             action_src[i, :a] = b["action_src"]
             action_tgt[i, :a] = b["action_tgt"]
+            action_tgt2[i, :a] = b.get("action_tgt2", np.zeros(a, np.int64))
+            action_choice[i, :a] = b.get("action_choice", np.zeros(a, np.float32))
             action_mask[i, :a] = True
+            if "cand_feats" in b:
+                cand_feats[i, :a] = b["cand_feats"]
+                cand_tok_pos[i, :a] = b["cand_tok_pos"]
+                cand_tok_role[i, :a] = b["cand_tok_role"]
+                cand_tok_mask[i, :a] = b["cand_tok_mask"]
+                cand_named_id[i, :a] = b["cand_named_id"]
 
     return {
         "card_feats": card_feats,
@@ -256,5 +411,12 @@ def collate(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
         "action_cat": action_cat,
         "action_src": action_src,
         "action_tgt": action_tgt,
+        "action_tgt2": action_tgt2,
+        "action_choice": action_choice,
         "action_mask": action_mask,
+        "cand_feats": cand_feats,
+        "cand_tok_pos": cand_tok_pos,
+        "cand_tok_role": cand_tok_role,
+        "cand_tok_mask": cand_tok_mask,
+        "cand_named_id": cand_named_id,
     }

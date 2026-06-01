@@ -8,7 +8,7 @@ from network.model import LorcanaNet
 from training.learner import Sample, ReplayBuffer, Learner
 
 
-def _obs(n_cards=4, n_actions=3, opp_hand=3, opp_deck=5):
+def _obs(n_cards=4, n_actions=3, opp_hand=3, opp_deck=5, opp_ink=0):
     cards = [{
         "id": f"c{i}", "owner": i % 2, "zone": "play", "cardType": "character",
         "cost": i, "strength": 2, "willpower": 3, "lore": 1, "damage": 0,
@@ -20,7 +20,7 @@ def _obs(n_cards=4, n_actions=3, opp_hand=3, opp_deck=5):
     hidden = {
         "hand": [{"id": f"h{i}", "def": f"opp-def-{i}"} for i in range(opp_hand)],
         "deck": [{"id": f"d{i}", "def": f"opp-def-{100 + i}"} for i in range(opp_deck)],
-        "inkwell": [],
+        "inkwell": [{"id": f"w{i}", "def": f"opp-def-{200 + i}"} for i in range(opp_ink)],
     }
     return {
         "turn": 3, "phase": "main", "status": "playing", "done": False, "winner": None,
@@ -41,6 +41,28 @@ def test_encode_belief_shapes_and_labels():
     assert bel["belief_label"][:3].sum() == 3 and bel["belief_label"][3:].sum() == 0
 
 
+def test_inkwell_belief_target_and_learning():
+    # #10: pool includes inkwell; a second target (in_inkwell) is emitted + learned
+    bel = encode_belief(_obs(opp_hand=3, opp_deck=5, opp_ink=2))
+    assert int(bel["n_pool"]) == 10                 # 3 hand + 5 deck + 2 inkwell
+    assert int(bel["belief_inkcount"]) == 2
+    assert bel["belief_label_ink"][-2:].sum() == 2  # last 2 (inkwell) flagged
+    assert bel["belief_label"].sum() == 3 and (bel["belief_label"] * bel["belief_label_ink"]).sum() == 0
+    # the head learns inkwell membership on a fixed obs
+    net = LorcanaNet(d_model=32, n_layers=2)
+    learner = Learner(net, lr=3e-3)
+    buf = ReplayBuffer()
+    o = _obs(opp_hand=3, opp_deck=5, opp_ink=2)
+    for _ in range(32):
+        buf.add(Sample(enc=encode_obs(o), pi=np.array([1, 0, 0], np.float32), z=0.0,
+                       belief=encode_belief(o)))
+    s0 = learner.train_epoch(buf, batch_size=16)
+    for _ in range(30):
+        s1 = learner.train_epoch(buf, batch_size=16)
+    assert "belief_ink" in s1 and s1["belief_ink"] < s0["belief_ink"]
+    assert s1["belief_ink_sep"] > 0.3              # separates inked from not
+
+
 def test_belief_probs_normalize_to_handcount():
     net = LorcanaNet(d_model=32, n_layers=1)
     batch = {**collate([encode_obs(_obs())]), **collate_belief([encode_belief(_obs())])}
@@ -54,7 +76,8 @@ def test_belief_is_leak_free():
     net = LorcanaNet(d_model=32, n_layers=2)
     base = {**collate([encode_obs(_obs())]), **collate_belief([encode_belief(_obs())])}
     scrambled = {k: v.copy() for k, v in base.items()}
-    scrambled["belief_ids"] = np.random.randint(2, 4000, size=base["belief_ids"].shape).astype(np.int64)
+    from engine.serialization import VOCAB_SIZE
+    scrambled["belief_ids"] = np.random.randint(2, VOCAB_SIZE, size=base["belief_ids"].shape).astype(np.int64)
     o1 = net.forward({k: torch.as_tensor(v) for k, v in base.items()})
     o2 = net.forward({k: torch.as_tensor(v) for k, v in scrambled.items()})
     assert torch.allclose(o1["policy_logits"], o2["policy_logits"], atol=1e-6)

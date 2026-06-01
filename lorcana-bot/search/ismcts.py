@@ -123,7 +123,7 @@ class BISMCTS:
 
     def run_belief(self, root_obs: dict, belief_evaluator,
                    n_worlds: int = 8, sims_per_world: int | None = None,
-                   proposal: str = "belief") -> SearchResult:
+                   proposal: str = "belief", tracker=None) -> SearchResult:
         """Belief-guided importance-weighted determinization search (Phase 2).
 
         Samples N opponent-hand worlds from the belief, runs a Phase-1 PUCT
@@ -132,6 +132,10 @@ class BISMCTS:
         determinization only changes the opponent's HIDDEN cards, so the acting
         player's filtered view — and hence the root legal-action set — is
         identical across all worlds, letting us pool by action index.
+
+        If `tracker` (a search.belief_filter.BeliefTracker) is given, worlds are
+        drawn from a persistent SIR particle filter conditioned on accumulated
+        public evidence; otherwise they're sampled fresh from the belief each ply.
         """
         cfg = self.cfg
         shared = InfoSetNode(root_obs)
@@ -142,11 +146,20 @@ class BISMCTS:
         self_id = root_obs.get("self")
         hand_count = root_obs.get("players", {}).get("opp", {}).get("handCount", 0)
         pool_ids, probs = belief_evaluator(root_obs)
-        worlds = sample_worlds(pool_ids, probs, hand_count, n_worlds, proposal, self.rng)
+        if tracker is not None:
+            worlds = tracker.worlds(pool_ids, probs, hand_count, n_worlds)
+        else:
+            worlds = sample_worlds(pool_ids, probs, hand_count, n_worlds, proposal, self.rng)
 
         sub_sims = sims_per_world or cfg.simulations
         sub_cfg = replace(cfg, simulations=sub_sims, dirichlet_eps=0.0)
         sub = BISMCTS(self.engine, self.evaluator, sub_cfg, self.rng)
+
+        # pool by EXACT stable-key, not positional index: determinization must not
+        # reorder/relabel the acting player's options, or visits land on wrong actions.
+        shared_keys = [a["stableKey"] for a in shared.legal]
+        shared_index = {k: i for i, k in enumerate(shared_keys)}
+        shared_keyset = set(shared_keys)
 
         true_root = self.engine.snapshot()
         pooled_worlds = 0
@@ -155,12 +168,16 @@ class BISMCTS:
             for k, world in enumerate(worlds):
                 self.engine.restore(true_root)
                 world_obs = self.engine.determinize(self_id, world.hand_ids, seed=f"w{k}")
-                # determinization must not change the acting player's options
-                if len(world_obs.get("legal", [])) != shared.n_actions:
+                world_keys = [a["stableKey"] for a in world_obs.get("legal", [])]
+                # require the identical option set (determinization touches only
+                # the opponent's hidden cards, so the actor's keys must be unchanged)
+                if set(world_keys) != shared_keyset:
                     continue
                 res = sub.run(world_obs)
-                shared.N += world.weight * res.root.N
-                shared.W += world.weight * res.root.W
+                for j, wk in enumerate(world_keys):
+                    i = shared_index[wk]
+                    shared.N[i] += world.weight * res.root.N[j]
+                    shared.W[i] += world.weight * res.root.W[j]
                 pooled_worlds += 1
                 total_w += world.weight
         finally:

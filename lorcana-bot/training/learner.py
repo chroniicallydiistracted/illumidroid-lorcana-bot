@@ -124,6 +124,22 @@ def loss_terms(net, tb, pi_target, z, c_value=1.0, c_entropy=0.0,
         stats["belief_count_mae"] = float(count_loss.detach())
         stats["belief_sep"] = float((pos - neg).detach())  # >0 means it separates
 
+        # inkwell belief: which cards the opponent chose to ink (hidden, strategic)
+        if "belief_logits_ink" in out and "belief_label_ink" in tb:
+            ilabel = tb["belief_label_ink"]
+            ilogits = torch.nan_to_num(out["belief_logits_ink"], neginf=0.0)
+            ibce = F.binary_cross_entropy_with_logits(ilogits, ilabel, reduction="none")
+            ink_loss = (ibce * bmask.float()).sum() / denom
+            iprobs = torch.sigmoid(ilogits) * bmask.float()
+            ink_count_loss = F.l1_loss(iprobs.sum(dim=-1), tb["belief_inkcount"].float())
+            total = total + c_belief * ink_loss + c_count * ink_count_loss
+            with torch.no_grad():
+                ipos = (iprobs * ilabel).sum() / ilabel.sum().clamp_min(1.0)
+                ineg = (iprobs * (1 - ilabel) * bmask.float()).sum() / \
+                       ((1 - ilabel) * bmask.float()).sum().clamp_min(1.0)
+            stats["belief_ink"] = float(ink_loss.detach())
+            stats["belief_ink_sep"] = float((ipos - ineg).detach())
+
     stats["loss"] = float(total.detach())
     return total, stats
 

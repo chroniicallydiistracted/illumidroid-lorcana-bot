@@ -1,12 +1,17 @@
-# lorcana-bot — Phase 1 (plain neural-ISMCTS)
+# lorcana-bot — B-ISMCTS agent (Phases 0–3 complete)
 
 Python ML stack that drives the Lorcanito TypeScript engine to play Disney
-Lorcana. Phase 1 is the end-to-end self-play loop: bridge → network → search →
-bootstrap. No belief net, no league yet (Phases 2–4).
+Lorcana. Implemented: bridge → set-transformer net (policy + distributional
+value + **belief** heads) → B-ISMCTS (PUCT, depth-limited, **belief-guided
+importance-weighted determinization**, leaf-batched GPU inference) → training
+(BC bootstrap, self-play, **league/PSRO + exploitability**). Plays the real
+25-deck tournament metagame. Phases 0–3 done; Phase 4 (ReBeL/PBS, richer value
+heads) is future.
 
-See `../CLAUDE.md` for project memory and `../lorcana-simulator/lorcana-bot-architecture.md`
-for the full design. Phase 1 deliverable write-up:
-`../lorcana-simulator/phase1/PHASE1-COMPLETION-REPORT.md`.
+**Run it:** `../train.sh` (parallel self-play) or `../train.sh league` (PFSP).
+See `../CLAUDE.md` for current state + commands, `../lorcana-simulator/lorcana-bot-architecture.md`
+for the design, `PORT-AUDIT.md` for the engine-port analysis, and the phase
+reports in `../lorcana-simulator/phase{1,2,3}/`.
 
 ## Layout
 

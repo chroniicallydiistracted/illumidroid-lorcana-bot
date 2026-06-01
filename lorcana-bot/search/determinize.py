@@ -44,6 +44,8 @@ def sample_worlds(pool_ids: list[str], probs: np.ndarray, hand_count: int,
                   rng: np.random.Generator | None = None) -> list[World]:
     """Return N belief-sampled opponent-hand worlds with importance weights."""
     rng = rng or np.random.default_rng()
+    if n_worlds <= 0:
+        return []
     n = len(pool_ids)
     hand_count = max(0, min(int(hand_count), n))
     if n == 0 or hand_count == 0:

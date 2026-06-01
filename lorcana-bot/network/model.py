@@ -39,10 +39,14 @@ class LorcanaNet(nn.Module):
 
     def forward(self, batch: dict) -> dict:
         trunk_vec, token_reps = self.trunk(batch)
+        # named-card token reuses the trunk's identity embedding (padding_idx 0 -> 0 vec)
+        named_emb = self.trunk.card_encoder.id_embed(batch["cand_named_id"])
         policy_logits = self.policy(
             trunk_vec, token_reps,
-            batch["action_cat"], batch["action_src"],
-            batch["action_tgt"], batch["action_mask"],
+            batch["action_cat"], batch["action_mask"],
+            batch["cand_feats"], batch["cand_tok_pos"],
+            batch["cand_tok_role"], batch["cand_tok_mask"],
+            named_emb, batch["cand_named_id"],
         )
         value_logits = self.value(trunk_vec)
         out = {
@@ -53,7 +57,9 @@ class LorcanaNet(nn.Module):
         if "belief_ids" in batch:
             # candidate identity embeddings reuse the trunk's identity vocabulary
             cand_emb = self.trunk.card_encoder.id_embed(batch["belief_ids"])  # [B,P,D]
-            out["belief_logits"] = self.belief(trunk_vec, cand_emb, batch["belief_mask"])
+            bl = self.belief(trunk_vec, cand_emb, batch["belief_mask"])       # [B,P,2]
+            out["belief_logits"] = bl[..., 0]        # in opp hand
+            out["belief_logits_ink"] = bl[..., 1]    # in opp inkwell
         return out
 
     @torch.no_grad()

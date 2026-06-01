@@ -90,3 +90,49 @@ class ParticleFilter:
             return []
         idx = self.rng.choice(len(self.particles), size=n, replace=True, p=self.weights)
         return [World(hand_ids=list(self.particles[i]), weight=1.0) for i in idx]
+
+
+class BeliefTracker:
+    """Per-game SIR belief over the opponent's hidden hand, integrated into the
+    active self-play loop (Phase 2 §2.4). Each of our decisions:
+      * neural belief net = proposal; on the first decision (or whenever the
+        opponent's hidden pool changes because cards were revealed/played) we
+        (re)seed particles from it;
+      * otherwise we REWEIGHT the carried particles by the current belief and
+        resample (SIR) — conditioning on accumulated public evidence, so the
+        determinization worlds are temporally coherent instead of i.i.d. each ply.
+    `worlds()` returns determinization worlds drawn from the maintained particle
+    set for `run_belief`. (Basic SIR; full action-likelihood ReBeL is future.)
+    """
+
+    def __init__(self, n_particles: int = 64, ess_threshold: float = 0.5,
+                 rng: np.random.Generator | None = None) -> None:
+        self.n_particles = n_particles
+        self.ess_threshold = ess_threshold
+        self.rng = rng or np.random.default_rng()
+        self.pf: ParticleFilter | None = None
+        self.pool_set: frozenset[str] = frozenset()
+        self.reseeds = 0
+        self.updates = 0
+
+    def worlds(self, pool_ids: list[str], probs: np.ndarray, hand_count: int,
+               n_worlds: int) -> list[World]:
+        pset = frozenset(pool_ids)
+        prob_of = {cid: float(p) for cid, p in zip(pool_ids, probs)}
+        if self.pf is None or pset != self.pool_set or not self.pf.particles:
+            # (re)seed from the neural belief proposal — new game or revealed cards
+            self.pf = ParticleFilter(pool_ids, hand_count, rng=self.rng)
+            self.pf.seed_from_belief(np.asarray(probs, dtype=np.float64), self.n_particles)
+            self.pool_set = pset
+            self.reseeds += 1
+        else:
+            # correction: reweight carried particles by current belief, resample
+            def like(hand_set):
+                v = 1.0
+                for cid in hand_set:
+                    v *= max(prob_of.get(cid, 1e-6), 1e-6)
+                return v
+            self.pf.reweight(like)
+            self.pf.maybe_resample(self.ess_threshold)
+            self.updates += 1
+        return self.pf.to_worlds(n_worlds)

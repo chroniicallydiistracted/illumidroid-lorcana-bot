@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# All-in-one launcher: scaled net on GPU + batched inference + belief self-play
-# + live monitor. Ctrl-C saves and exits. Pass through any run.py flags.
+# All-in-one launcher. Two trainers:
+#   ./train.sh [flags]          -> training/run.py     (parallel self-play, the default)
+#   ./train.sh league [flags]   -> training/league_train.py (Phase-3 PFSP/league + Elo + exploitability)
 #
-#   ./train.sh                       # defaults (~13M net, runs forever)
-#   ./train.sh --rounds 50           # bounded run
-#   ./train.sh --sims 24 --batch 48  # more search / bigger leaf batches
-#   ./train.sh --help
+# Examples:
+#   ./train.sh                              # ~13M net, 6 actors, belief self-play, runs forever
+#   ./train.sh --actors 8 --rounds 50 --eval-every 5
+#   ./train.sh league --iterations 20 --games 6 --exploit
+#   ./train.sh --help        |  ./train.sh league --help
 set -euo pipefail
 cd "$(dirname "$0")"
 VENV="./lorcana-bot-venv/bin/python"
 [ -x "$VENV" ] || { echo "venv missing at $VENV"; exit 1; }
+if [ "${1:-}" = "league" ]; then
+  shift
+  exec "$VENV" lorcana-bot/training/league_train.py "$@"
+fi
 exec "$VENV" lorcana-bot/training/run.py "$@"

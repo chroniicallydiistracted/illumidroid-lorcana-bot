@@ -137,6 +137,19 @@ const STRATEGIES: Record<string, AutomatedActionStrategy> = {
   oracleDeckAware: deckAwareLoreRaceAutomatedActionStrategy,
 };
 
+// Widen the automation enumeration beyond its defaults (targetPool 8,
+// targetCombinationsPerFamily 16, choiceIndices 8, singerCombinations 16) so the
+// legal-action set the bot learns/searches over covers far more of the true
+// action space. Used for BOTH enumeration (the legal list) and execution (so a
+// chosen key is always re-enumerable). Full getAvailableMoves grammar is a larger
+// project; this closes most of the gap cheaply. Override via LORCANA_SEARCH_CAPS.
+const SEARCH_CAPS = {
+  targetPool: 24,
+  targetCombinationsPerFamily: 48,
+  choiceIndices: 16,
+  singerCombinations: 32,
+};
+
 const FORCED_FAMILIES = new Set([
   "chooseWhoGoesFirst",
   "alterHand",
@@ -174,28 +187,96 @@ function candidateKey(candidate: AutomatedActionCandidate): string {
   }
 }
 
-/** Pull the (source, target) card ids out of a candidate for the policy head. */
-function candidateRefs(c: AutomatedActionCandidate): { src: string | null; tgt: string | null } {
+/** The FULL candidate descriptor the neural policy needs to rank actions.
+ *  The stable key already encodes all of this (planner.ts) — the old policy only
+ *  saw {src,tgt,tgt2,choice}, so candidates sharing family/src/first-target but
+ *  differing in singer / shift target / 2nd-target / named card / discard-exert-
+ *  banish cost / destination / optional / choice-index collapsed to identical
+ *  features. This surfaces every distinguishing field (legacy tgt/tgt2 kept for
+ *  back-compat with the current head during migration). */
+type CandidateDescriptor = {
+  src: string | null;
+  targets: string[];          // all target card ids (first == tgt)
+  singers: string[];          // sing / sing-together exert-cost characters
+  shiftTarget: string | null; // the character being shifted onto
+  banish: string[];           // banish-cost cards (characters + items)
+  discard: string[];          // discard-cost cards (incl. shift discard)
+  exert: string[];            // exert-cost characters
+  costType: string;           // standard | free | shift | sing | none
+  inkCost: number;            // numeric amount if known, else -1
+  choice: number;             // choiceIndex (modal "or"), else -1
+  resolveOptional: boolean;   // optional "may" resolution
+  namedCard: string | null;   // named-card choice
+  abilityIndex: number;       // activated-ability index, else -1
+  destinationZones: string[]; // scry/destination zones
+  tgt: string | null;         // legacy: targets[0]
+  tgt2: string | null;        // legacy: targets[1]
+};
+
+function asArr(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+function emptyDescriptor(): CandidateDescriptor {
+  return { src: null, targets: [], singers: [], shiftTarget: null, banish: [], discard: [],
+           exert: [], costType: "none", inkCost: -1, choice: -1, resolveOptional: false,
+           namedCard: null, abilityIndex: -1, destinationZones: [], tgt: null, tgt2: null };
+}
+
+function candidateFeatures(c: AutomatedActionCandidate): CandidateDescriptor {
+  const any = c as any;
+  const costs = any.costs ?? {};
+  const ci = any.choiceIndex;
+  const d = emptyDescriptor();
+  d.banish = [...asArr(costs.banishCharacters), ...asArr(costs.banishItems)];
+  d.discard = asArr(costs.discardCards);
+  d.exert = asArr(costs.exertCharacters);
+  d.choice = typeof ci === "number" ? ci : -1;
+  d.resolveOptional = any.resolveOptional === true;
+  d.namedCard = typeof any.namedCard === "string" ? any.namedCard : null;
+  d.abilityIndex = typeof any.abilityIndex === "number" ? any.abilityIndex : -1;
+  d.destinationZones = Array.isArray(any.destinations)
+    ? any.destinations.map((x: any) => String(x.zone)) : [];
+
+  let targets = asArr(any.targets);
   switch (c.family) {
     case "putCardIntoInkwell":
-      return { src: c.cardId, tgt: null };
-    case "playCard":
-      return { src: c.cardId, tgt: c.targets?.[0] ?? null };
-    case "activateAbility":
-      return { src: c.cardId, tgt: c.targets?.[0] ?? null };
     case "quest":
-      return { src: c.cardId, tgt: null };
+    case "activateAbility":
+      d.src = c.cardId;
+      break;
+    case "playCard": {
+      d.src = c.cardId;
+      const cost = any.cost;
+      if (typeof cost === "string") {
+        d.costType = cost;
+      } else if (cost && typeof cost === "object") {
+        d.costType = String(cost.cost ?? "standard");
+        if (typeof cost.amount === "number") d.inkCost = cost.amount;
+        if (cost.shiftTarget) d.shiftTarget = String(cost.shiftTarget);
+        if (cost.singer) d.singers = [String(cost.singer)];
+        if (Array.isArray(cost.singerIds)) d.singers = asArr(cost.singerIds);
+        if (Array.isArray(cost.discardCards)) d.discard = [...d.discard, ...asArr(cost.discardCards)];
+        if (Array.isArray(cost.targets)) targets = [...targets, ...asArr(cost.targets)];
+      }
+      break;
+    }
     case "challenge":
-      return { src: c.attackerId, tgt: c.defenderId };
+      d.src = c.attackerId;
+      targets = [c.defenderId, ...targets];
+      break;
     case "moveCharacterToLocation":
-      return { src: c.characterId, tgt: c.locationId };
-    case "resolveBag":
-      return { src: null, tgt: c.targets?.[0] ?? null };
-    case "resolveEffect":
-      return { src: null, tgt: c.targets?.[0] ?? null };
+      d.src = c.characterId;
+      targets = [c.locationId, ...targets];
+      break;
     default:
-      return { src: null, tgt: null };
+      break;  // resolveBag / resolveEffect / setup: targets already pulled
   }
+  if (d.singers.length === 0) d.singers = asArr(any.cardPlayed?.singerIds);
+  d.targets = targets.filter((x) => typeof x === "string");
+  d.tgt = d.targets[0] ?? null;
+  d.tgt2 = d.targets[1] ?? null;
+  return d;
 }
 
 /** Strategy that orders the chosen candidate first; rest follow (keeps progress). */
@@ -342,10 +423,10 @@ class Session {
   private executeKey(key: string): boolean {
     const server = this.engine.asServer();
     if (key === PASS_KEY) {
-      const res = server.takeAutomatedActionForCurrentActor({ strategy: PASS_STRATEGY });
+      const res = server.takeAutomatedActionForCurrentActor({ strategy: PASS_STRATEGY, searchCaps: SEARCH_CAPS });
       return Boolean(res.finalResult?.success) || res.fallbackTaken === "passTurn";
     }
-    const res = server.takeAutomatedActionForCurrentActor({ strategy: chooseKeyStrategy(key) });
+    const res = server.takeAutomatedActionForCurrentActor({ strategy: chooseKeyStrategy(key), searchCaps: SEARCH_CAPS });
     return Boolean(res.finalResult?.success);
   }
 
@@ -371,13 +452,13 @@ class Session {
   }
 
   private currentActor(): string | undefined {
-    const enumr = this.engine.asServer().enumerateAutomatedActionsForCurrentActor();
+    const enumr = this.engine.asServer().enumerateAutomatedActionsForCurrentActor({ searchCaps: SEARCH_CAPS });
     return enumr.actorId;
   }
 
   observe() {
     const server = this.engine.asServer();
-    const enumr = server.enumerateAutomatedActionsForCurrentActor();
+    const enumr = server.enumerateAutomatedActionsForCurrentActor({ searchCaps: SEARCH_CAPS });
     const actorId: string | undefined = enumr.actorId;
     const view = viewFor(actorId);
     const board: any = this.engine.getBoard(view);
@@ -389,11 +470,11 @@ class Session {
     const forced = [...families].some((f) => FORCED_FAMILIES.has(f as string));
 
     const legal: any[] = enumr.candidates.map((c: AutomatedActionCandidate, idx: number) => {
-      const refs = candidateRefs(c);
-      return { idx, stableKey: candidateKey(c), family: c.family, src: refs.src, tgt: refs.tgt };
+      return { idx, stableKey: candidateKey(c), family: c.family, ...candidateFeatures(c) };
     });
     if (!forced && board.status === "playing") {
-      legal.push({ idx: legal.length, stableKey: PASS_KEY, family: "passTurn", src: null, tgt: null });
+      legal.push({ idx: legal.length, stableKey: PASS_KEY, family: "passTurn",
+                   ...emptyDescriptor() });
     }
 
     const mkPlayer = (pid: string) => {
@@ -453,11 +534,11 @@ class Session {
     let executed: string | null = null;
     let success = false;
     if (stableKey === PASS_KEY) {
-      const res = server.takeAutomatedActionForCurrentActor({ strategy: PASS_STRATEGY });
+      const res = server.takeAutomatedActionForCurrentActor({ strategy: PASS_STRATEGY, searchCaps: SEARCH_CAPS });
       success = Boolean(res.finalResult?.success) || res.fallbackTaken === "passTurn";
       executed = res.fallbackTaken === "passTurn" ? PASS_KEY : (res.selectedCandidate ? candidateKey(res.selectedCandidate) : null);
     } else {
-      const res = server.takeAutomatedActionForCurrentActor({ strategy: chooseKeyStrategy(stableKey) });
+      const res = server.takeAutomatedActionForCurrentActor({ strategy: chooseKeyStrategy(stableKey), searchCaps: SEARCH_CAPS });
       success = Boolean(res.finalResult?.success);
       executed = res.selectedCandidate ? candidateKey(res.selectedCandidate) : (res.fallbackTaken ?? null);
     }
@@ -469,7 +550,7 @@ class Session {
   stepAuto(strategyName: string) {
     const strategy = STRATEGIES[strategyName] ?? STRATEGIES.best;
     const server = this.engine.asServer();
-    const res = server.takeAutomatedActionForCurrentActor({ strategy });
+    const res = server.takeAutomatedActionForCurrentActor({ strategy, searchCaps: SEARCH_CAPS });
     const executed = res.selectedCandidate ? candidateKey(res.selectedCandidate) : (res.fallbackTaken ?? null);
     const family = res.selectedCandidate?.family ?? (res.fallbackTaken ?? null);
     this.steps += 1;

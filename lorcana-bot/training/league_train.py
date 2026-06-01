@@ -13,6 +13,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+
+# make engine/network/search/training importable when run as a script
+_BOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BOT not in sys.path:
+    sys.path.insert(0, _BOT)
 
 import numpy as np
 
@@ -118,7 +124,8 @@ def run_league(init: str = "", iterations: int = 3, games_per_iter: int = 6,
         exploit = None
         if run_exploit:
             exp = exploitability_proxy(engine, net, lambda: LorcanaNet(d_model=d_model, n_layers=layers),
-                                       cfg, n_iters=1, games_per_iter=4, epochs=1, rng=rng)
+                                       cfg, n_iters=1, games_per_iter=4, epochs=1, rng=rng,
+                                       use_belief=use_belief)
             exploit = exp["exploitability"]
 
     import torch

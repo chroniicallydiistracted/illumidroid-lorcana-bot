@@ -239,13 +239,9 @@ step per IPC round-trip. Two changes:
 
 Measured after Option 1: **~24–25 sims/s plain, ~39 sims/s belief** (≈0.75–0.81
 decisions/s/actor) — ~5–8× the old per-step search; the engine is now the
-in-process limiter. With the parallel actor pool (`training/distributed.py`,
-~3× at ~8 actors) that's the practical training rate.
-
-```bash
-python -m training.distributed --init lorcana-bot/checkpoints/bc_fair.pt \
-  --rounds R --actors 8 --games-per-actor 1 --sims 8 --n-worlds 4   # [--no-belief]
-```
+in-process limiter. The parallel actor pool (`training/parallel.py`, driven by
+`run.py --actors N`) adds ~3× at ~8 actors — that's the practical training rate.
+(The old `training/distributed.py` was removed; `run.py`/`parallel.py` supersede it.)
 
 **Leaf-batching + batched GPU inference (DONE).** `SearchConfig.batch_size>1`
 enables virtual-loss wave batching (`InfoSetNode.vloss`, `BISMCTS.run_batched`):
