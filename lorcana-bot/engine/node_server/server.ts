@@ -318,6 +318,9 @@ function shallowProtect(s: any): any {
   return { ...s, G: { ...s.G }, ctx: { ...s.ctx } };
 }
 
+const HIST_MAX = 48;   // rolling window of recent PUBLIC events (§2.3)
+const CANON = [CANONICAL_PLAYER_ONE, CANONICAL_PLAYER_TWO];
+
 class Session {
   engine: AnyEngine;
   seed: string;
@@ -326,6 +329,9 @@ class Session {
   deckP2: string | null;
   private snapshots = new Map<number, any>();
   private snapCounter = 0;
+  // per-game public action history (§2.3). Mutated ONLY by real step/stepAuto —
+  // NOT by runPaths/executeKey — so search leaves share the root's history.
+  private history: any[] = [];
 
   constructor(seed: string, deckP1?: string | null, deckP2?: string | null) {
     this.seed = seed;
@@ -456,6 +462,42 @@ class Session {
     return enumr.actorId;
   }
 
+  private idxOf(pid?: string): number {
+    return pid === CANONICAL_PLAYER_TWO ? 1 : 0;
+  }
+
+  /** Public counts both players can legally see (lore, ink count, hand count). */
+  private publicCounts() {
+    const b: any = this.engine.getBoard("playerOne");
+    const get = (pid: string) => {
+      const pb = b.players[pid] ?? {};
+      return { lore: pb.lore ?? 0, ink: (pb.inkwell ?? []).length, hand: pb.handCount ?? 0 };
+    };
+    const a = get(CANON[0]!), c = get(CANON[1]!);
+    return { lore: [a.lore, c.lore], ink: [a.ink, c.ink], hand: [a.hand, c.hand],
+             turn: b.turnNumber ?? 0, cards: b.cards };
+  }
+
+  /** Append one PUBLIC event after a real move. The played-card identity is the
+   *  key belief signal (a card left the opponent's hand); inked cards stay hidden
+   *  (defId null) — we record only that a hidden card moved hand->inkwell. */
+  private pushHistoryEvent(actorId: string | undefined, key: string) {
+    const parts = key.split(":");
+    const family = parts[0] ?? "";
+    const cardId = parts[1] ?? null;
+    const pc = this.publicCounts();
+    let defId: string | null = null;
+    if (family === "playCard" && cardId) {
+      const c: any = (pc.cards as any)[cardId];
+      if (c && !c.hidden) defId = c.definitionId ?? null;
+    }
+    this.history.push({
+      actor: this.idxOf(actorId), family, defId,
+      lore: pc.lore, ink: pc.ink, hand: pc.hand, turn: pc.turn,
+    });
+    if (this.history.length > HIST_MAX) this.history.shift();
+  }
+
   observe() {
     const server = this.engine.asServer();
     const enumr = server.enumerateAutomatedActionsForCurrentActor({ searchCaps: SEARCH_CAPS });
@@ -525,12 +567,15 @@ class Session {
       cards,
       legal,
       forced,
+      selfIdx: this.idxOf(selfId),       // index of `self` in CANON order (history frame)
+      history: this.history.slice(-HIST_MAX),
       hidden: this.oppHidden(selfId),
     };
   }
 
   step(stableKey: string) {
     const server = this.engine.asServer();
+    const actor = this.currentActor();   // who is about to move (before execution)
     let executed: string | null = null;
     let success = false;
     if (stableKey === PASS_KEY) {
@@ -543,6 +588,7 @@ class Session {
       executed = res.selectedCandidate ? candidateKey(res.selectedCandidate) : (res.fallbackTaken ?? null);
     }
     this.steps += 1;
+    this.pushHistoryEvent(actor, executed ?? stableKey);
     const obs = this.observe();
     return { obs, executed, requested: stableKey, matched: executed === stableKey, success };
   }
@@ -550,10 +596,12 @@ class Session {
   stepAuto(strategyName: string) {
     const strategy = STRATEGIES[strategyName] ?? STRATEGIES.best;
     const server = this.engine.asServer();
+    const actor = this.currentActor();   // who is about to move (before execution)
     const res = server.takeAutomatedActionForCurrentActor({ strategy, searchCaps: SEARCH_CAPS });
     const executed = res.selectedCandidate ? candidateKey(res.selectedCandidate) : (res.fallbackTaken ?? null);
     const family = res.selectedCandidate?.family ?? (res.fallbackTaken ?? null);
     this.steps += 1;
+    this.pushHistoryEvent(actor, executed ?? `${family}:`);
     const obs = this.observe();
     // `policy` lets the Python side assert no oracle play taints training data.
     return { obs, executed, family, success: Boolean(res.finalResult?.success),

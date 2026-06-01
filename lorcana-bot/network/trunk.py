@@ -16,6 +16,8 @@ import torch.nn as nn
 from engine.serialization import (
     CARD_FEATURE_DIM,
     GLOBAL_FEATURE_DIM,
+    HIST_FEAT_DIM,
+    HIST_MAX,
     VOCAB_SIZE,
     PAD_ID,
 )
@@ -32,12 +34,49 @@ class CardEncoder(nn.Module):
         return self.norm(self.feat_proj(card_feats) + self.id_embed(card_ids))
 
 
+class HistoryEncoder(nn.Module):
+    """Public-history encoder (§2.3). Summarizes the rolling window of public
+    events into one vector fused into the trunk's global token, sharpening the
+    belief (and policy/value) — e.g. cards the opponent has played left their
+    hand. `id_embed` (the card-identity table) is shared with the trunk so a
+    played card and its board token mean the same thing. A learned CLS token is
+    always valid, so empty/early-game histories never produce an all-padded row."""
+
+    def __init__(self, d_model: int, id_embed: nn.Embedding, n_heads: int = 4) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.id_embed = id_embed
+        self.feat_proj = nn.Linear(HIST_FEAT_DIM, d_model)
+        self.pos_embed = nn.Embedding(HIST_MAX + 1, d_model)
+        self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads, dim_feedforward=2 * d_model,
+            dropout=0.0, batch_first=True, activation="gelu", norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=1, enable_nested_tensor=False)
+        self.fuse = nn.Linear(d_model, d_model)
+
+    def forward(self, hist_feats: torch.Tensor, hist_ids: torch.Tensor,
+                hist_mask: torch.Tensor) -> torch.Tensor:
+        """[B,H,Fh],[B,H],[B,H] -> [B,D] history summary."""
+        B, H, _ = hist_feats.shape
+        pos = torch.arange(H, device=hist_feats.device).clamp(max=HIST_MAX)
+        tok = self.feat_proj(hist_feats) + self.id_embed(hist_ids) + self.pos_embed(pos).unsqueeze(0)
+        cls = self.cls.expand(B, 1, self.d_model)
+        seq = torch.cat([cls, tok], dim=1)                       # [B, 1+H, D]
+        valid = torch.ones(B, 1, dtype=torch.bool, device=hist_mask.device)
+        key_padding = ~torch.cat([valid, hist_mask], dim=1)      # CLS always valid
+        out = self.encoder(seq, src_key_padding_mask=key_padding)
+        return self.fuse(out[:, 0, :])                           # CLS summary
+
+
 class Trunk(nn.Module):
     def __init__(self, d_model: int = 128, n_heads: int = 4, n_layers: int = 3,
                  ff: int = 256, dropout: float = 0.0) -> None:
         super().__init__()
         self.d_model = d_model
         self.card_encoder = CardEncoder(d_model)
+        self.history_encoder = HistoryEncoder(d_model, self.card_encoder.id_embed, n_heads)
         self.global_proj = nn.Sequential(
             nn.Linear(GLOBAL_FEATURE_DIM, d_model), nn.GELU(), nn.Linear(d_model, d_model)
         )
@@ -62,7 +101,11 @@ class Trunk(nn.Module):
 
         card_tok = self.card_encoder(card_feats, card_ids)        # [B, N, D]
         null_tok = self.null_token.expand(B, 1, self.d_model)     # [B, 1, D]
-        cls_tok = self.global_proj(globals_).unsqueeze(1)         # [B, 1, D]
+        cls_vec = self.global_proj(globals_)                      # [B, D]
+        if "hist_feats" in batch:                                 # fuse public history (§2.3)
+            cls_vec = cls_vec + self.history_encoder(
+                batch["hist_feats"], batch["hist_ids"], batch["hist_mask"])
+        cls_tok = cls_vec.unsqueeze(1)                            # [B, 1, D]
 
         seq = torch.cat([null_tok, card_tok, cls_tok], dim=1)     # [B, N+2, D]
         valid = torch.ones(B, 1, dtype=torch.bool, device=card_mask.device)

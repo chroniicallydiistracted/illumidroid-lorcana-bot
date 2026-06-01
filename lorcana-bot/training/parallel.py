@@ -39,7 +39,7 @@ def _worker(cfg: dict, q) -> None:
         net.load_state_dict(ck["model"])
         net.eval()
         rng = np.random.default_rng(int(cfg["seed"]))   # int seed (numpy requires int/None)
-        sc = SearchConfig(simulations=cfg["sims"], depth_limit=4, temperature=1.0,
+        sc = SearchConfig(simulations=cfg["sims"], depth_limit=cfg.get("depth", 10), temperature=1.0,
                           dirichlet_eps=0.25, batch_size=cfg["batch"])
         use_belief, n_worlds = cfg["use_belief"], cfg["n_worlds"]
         per = sc.simulations * (n_worlds if use_belief else 1)

@@ -94,6 +94,9 @@ def main() -> None:
     ap.add_argument("--d-model", type=int, default=512, help="trunk width (default 512 ~13M params)")
     ap.add_argument("--layers", type=int, default=8)
     ap.add_argument("--sims", type=int, default=16, help="MCTS sims per (world)")
+    ap.add_argument("--depth", type=int, default=10,
+                    help="search horizon in decision plies (a Lorcana turn is many plies; "
+                         "was 4 — too shallow to clear a turn). Deeper = stronger but slower.")
     ap.add_argument("--batch", type=int, default=32, help="leaf-batch / virtual-loss wave size")
     ap.add_argument("--n-worlds", type=int, default=4, help="belief determinizations per decision")
     ap.add_argument("--no-belief", action="store_true")
@@ -101,6 +104,9 @@ def main() -> None:
                     help="parallel self-play worker processes (1 = single-process)")
     ap.add_argument("--games-per-actor", type=int, default=1, help="games each actor plays per round")
     ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--train-batch", type=int, default=128,
+                    help="learner minibatch (8GB-safe with the history+candidate transformers; "
+                         "256 can spill to slow host memory on this card)")
     ap.add_argument("--rounds", type=int, default=0, help="0 = run forever (Ctrl-C to stop)")
     ap.add_argument("--bc-games", type=int, default=6, help="fair behaviour-clone warmup games (0 to skip)")
     ap.add_argument("--eval-every", type=int, default=5, help="rounds between gauntlet evals (0 = never)")
@@ -129,7 +135,7 @@ def main() -> None:
     n_params = sum(p.numel() for p in net.parameters())
 
     learner = Learner(net, lr=1e-3, c_kl=0.5, c_entropy=0.01, device=device)
-    cfg = SearchConfig(simulations=args.sims, depth_limit=4, temperature=1.0,
+    cfg = SearchConfig(simulations=args.sims, depth_limit=args.depth, temperature=1.0,
                        dirichlet_eps=0.25, batch_size=args.batch)
     games_per_round = max(1, args.actors) * args.games_per_actor
     mon = LiveMonitor(interval=3.0, total_games=(args.rounds * games_per_round or None)).start()
@@ -174,7 +180,7 @@ def main() -> None:
                 st = {}
                 for _ in range(4):
                     if len(buf):
-                        st = learner.train_epoch(buf, batch_size=256)
+                        st = learner.train_epoch(buf, batch_size=args.train_batch)
                         mon.update(loss=st.get("loss"), losses=st)
                 mon.event(f"bootstrap done: {len(buf)} samples, loss={st.get('loss', 0):.3f}")
                 save()
@@ -191,7 +197,7 @@ def main() -> None:
                     from training.parallel import generate_round_parallel
                     wcfg = {"bot_root": _BOT, "sims": args.sims, "batch": args.batch,
                             "n_worlds": args.n_worlds, "use_belief": use_belief,
-                            "games": args.games_per_actor,
+                            "games": args.games_per_actor, "depth": args.depth,
                             "trace": args.trace, "trace_dir": trace_dir, "round": rounds_done}
                     raw, rs, rd, rg = generate_round_parallel(work_ckpt, args.actors, wcfg,
                                                               mon, base, rounds_done,
@@ -212,7 +218,7 @@ def main() -> None:
                 st = {}
                 for _ in range(args.epochs):
                     if len(buf):
-                        st = learner.train_epoch(buf, batch_size=256)
+                        st = learner.train_epoch(buf, batch_size=args.train_batch)
                 mon.update(loss=st.get("loss"), losses=st or None)
                 rounds_done += 1
                 save()

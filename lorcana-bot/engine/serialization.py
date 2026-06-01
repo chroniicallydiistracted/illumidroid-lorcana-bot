@@ -125,6 +125,21 @@ CAND_FEAT_DIM = (
     + 3                    # arity counts: n_targets, n_singers, n_costcards (scaled)
 )
 
+# --- public-history encoder (§2.3) -------------------------------------------
+# A rolling window of recent PUBLIC events. Each event is a token: what family of
+# move, by self or opponent, the public counts after it, recency, and the played-
+# card identity (the key belief signal — a card that left the opponent's hand;
+# inked cards stay hidden so defId is 0). Everything here is public => leak-free.
+HIST_MAX = 48              # must match the bridge's HIST_MAX
+HIST_FEAT_DIM = (
+    NUM_CATEGORIES         # family one-hot
+    + 1                    # is-self (actor == viewer)
+    + 6                    # lore/ink/hand for self & opp (scaled)
+    + 1                    # turn (scaled)
+    + 1                    # recency (events-ago, scaled)
+    + 1                    # has played-card identity
+)
+
 
 def vocab_id(definition_id: Any, hidden: bool) -> int:
     if hidden or definition_id is None:
@@ -235,6 +250,35 @@ def _encode_candidate(act: dict, pos_of: dict[str, int]):
     return f, tok_pos, tok_role, tok_mask, named_id
 
 
+def encode_history(obs: dict):
+    """Public event history -> (feats [H, HIST_FEAT_DIM], ids [H]). All public,
+    so it is safe to feed the trunk (policy/value/belief). Self/opp are resolved
+    relative to the current viewer via `selfIdx`. Index 0 = oldest in window."""
+    hist = obs.get("history", []) or []
+    H = len(hist)
+    feats = np.zeros((H, HIST_FEAT_DIM), dtype=np.float32)
+    ids = np.zeros(H, dtype=np.int64)
+    so = int(obs.get("selfIdx", 0))
+    op = 1 - so
+    for i, e in enumerate(hist):
+        f = feats[i]
+        j = 0
+        f[CATEGORY_INDEX.get(e.get("family", ""), 0)] = 1.0
+        j += NUM_CATEGORIES
+        f[j] = 1.0 if int(e.get("actor", 0)) == so else 0.0
+        j += 1
+        lore = e.get("lore", [0, 0]); ink = e.get("ink", [0, 0]); hand = e.get("hand", [0, 0])
+        f[j] = _scale(lore[so], 20.0); f[j + 1] = _scale(lore[op], 20.0); j += 2
+        f[j] = _scale(ink[so], 12.0);  f[j + 1] = _scale(ink[op], 12.0);  j += 2
+        f[j] = _scale(hand[so], 12.0); f[j + 1] = _scale(hand[op], 12.0); j += 2
+        f[j] = _scale(e.get("turn", 0), 20.0); j += 1
+        f[j] = _scale(H - 1 - i, HIST_MAX); j += 1     # events-ago (newest = 0)
+        defid = e.get("defId")
+        f[j] = 1.0 if defid else 0.0
+        ids[i] = vocab_id(defid, hidden=False) if defid else 0
+    return feats, ids
+
+
 def encode_obs(obs: dict) -> dict[str, np.ndarray]:
     """Single observation -> dict of numpy arrays (unbatched)."""
     cards = obs.get("cards", [])
@@ -272,10 +316,15 @@ def encode_obs(obs: dict) -> dict[str, np.ndarray]:
         cand_tok_mask[j] = tm
         cand_named_id[j] = nid
 
+    hist_feats, hist_ids = encode_history(obs)
+
     return {
         "card_feats": card_feats,           # [N, Fc]
         "card_ids": card_ids,               # [N]
         "globals": encode_globals(obs),     # [G]
+        "hist_feats": hist_feats,           # [H, HIST_FEAT_DIM] (public events)
+        "hist_ids": hist_ids,               # [H] (played-card vocab id, 0 = none/hidden)
+        "n_hist": np.int64(len(hist_ids)),
         "action_cat": cat_idx,              # [A]
         "action_src": src_pos,              # [A] (0 = null)  (legacy)
         "action_tgt": tgt_pos,              # [A] (0 = null)  (legacy)
@@ -362,8 +411,10 @@ def collate(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     B = len(batch)
     max_n = max(int(b["n_cards"]) for b in batch) if B else 0
     max_a = max(int(b["n_actions"]) for b in batch) if B else 0
+    max_h = max((int(b.get("n_hist", 0)) for b in batch), default=0) if B else 0
     max_n = max(max_n, 1)
     max_a = max(max_a, 1)
+    max_h = max(max_h, 1)
 
     card_feats = np.zeros((B, max_n, CARD_FEATURE_DIM), dtype=np.float32)
     card_ids = np.zeros((B, max_n), dtype=np.int64)
@@ -380,10 +431,18 @@ def collate(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     cand_tok_role = np.zeros((B, max_a, CAND_TOK_MAX), dtype=np.int64)
     cand_tok_mask = np.zeros((B, max_a, CAND_TOK_MAX), dtype=bool)
     cand_named_id = np.zeros((B, max_a), dtype=np.int64)
+    hist_feats = np.zeros((B, max_h, HIST_FEAT_DIM), dtype=np.float32)
+    hist_ids = np.zeros((B, max_h), dtype=np.int64)
+    hist_mask = np.zeros((B, max_h), dtype=bool)
 
     for i, b in enumerate(batch):
         n = int(b["n_cards"])
         a = int(b["n_actions"])
+        h = int(b.get("n_hist", 0))
+        if h:
+            hist_feats[i, :h] = b["hist_feats"]
+            hist_ids[i, :h] = b["hist_ids"]
+            hist_mask[i, :h] = True
         if n:
             card_feats[i, :n] = b["card_feats"]
             card_ids[i, :n] = b["card_ids"]
@@ -419,4 +478,7 @@ def collate(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
         "cand_tok_role": cand_tok_role,
         "cand_tok_mask": cand_tok_mask,
         "cand_named_id": cand_named_id,
+        "hist_feats": hist_feats,
+        "hist_ids": hist_ids,
+        "hist_mask": hist_mask,
     }

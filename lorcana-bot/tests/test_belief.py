@@ -85,6 +85,44 @@ def test_belief_is_leak_free():
     assert not torch.allclose(o1["belief_logits"], o2["belief_logits"], atol=1e-4)
 
 
+def _hist_event(family, actor, defId, turn):
+    return {"family": family, "actor": actor, "defId": defId,
+            "lore": [2, 1], "ink": [3, 2], "hand": [4, 5], "turn": turn}
+
+
+def test_history_influences_belief_and_is_leak_free():
+    """§2.3: the PUBLIC history must reach the belief head (and policy/value) via
+    the trunk — changing which cards the opponent has PLAYED changes the belief —
+    while the existing hidden-card leak-freeness is unaffected (history carries
+    only public ids)."""
+    from engine.serialization import HIST_FEAT_DIM
+
+    def batch_for(history):
+        o = _obs(opp_hand=3, opp_deck=5, opp_ink=2)
+        o["history"] = history
+        o["selfIdx"] = 0
+        enc = encode_obs(o)
+        assert enc["hist_feats"].shape == (len(history), HIST_FEAT_DIM)
+        return {**collate([enc]), **collate_belief([encode_belief(o)])}
+
+    h1 = [_hist_event("playCard", 1, "opp-def-100", 4),
+          _hist_event("putCardIntoInkwell", 1, None, 4)]
+    h2 = [_hist_event("playCard", 1, "opp-def-200", 4),   # opponent played a DIFFERENT card
+          _hist_event("putCardIntoInkwell", 1, None, 4)]
+
+    net = LorcanaNet(d_model=32, n_layers=2)
+    net.eval()
+    o1 = net.forward({k: torch.as_tensor(v) for k, v in batch_for(h1).items()})
+    o2 = net.forward({k: torch.as_tensor(v) for k, v in batch_for(h2).items()})
+    # different public history -> different belief (history reaches the belief head)
+    assert not torch.allclose(o1["belief_logits"], o2["belief_logits"], atol=1e-4)
+    # and it also moves policy/value (public info fused into the trunk)
+    assert not torch.allclose(o1["value_logits"], o2["value_logits"], atol=1e-4)
+    # identical history -> identical output (determinism)
+    a = net.forward({k: torch.as_tensor(v) for k, v in batch_for(h1).items()})
+    assert torch.allclose(o1["belief_logits"], a["belief_logits"], atol=1e-6)
+
+
 def test_belief_learns_fixed_pattern():
     """On a fixed obs (so identities carry signal), the head should learn which
     candidates are in hand: loss drops and in-hand/out separation grows."""
