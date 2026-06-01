@@ -150,6 +150,14 @@ const SEARCH_CAPS = {
   singerCombinations: 32,
 };
 
+// effectively-uncapped caps, for the grammar-gap proof (capped vs uncapped vs raw).
+const BIG_CAPS = {
+  targetPool: 9999,
+  targetCombinationsPerFamily: 9999,
+  choiceIndices: 9999,
+  singerCombinations: 9999,
+};
+
 const FORCED_FAMILIES = new Set([
   "chooseWhoGoesFirst",
   "alterHand",
@@ -299,6 +307,22 @@ function chooseKeyStrategy(targetKey: string): AutomatedActionStrategy {
   };
 }
 
+/** EXACT strategy: offers ONLY the requested candidate (no fallback list). Used
+ *  by search execution so a failed key can NEVER silently execute a different
+ *  candidate — that would make MCTS evaluate a leaf for a line the tree did not
+ *  choose, corrupting visit policies / leaf values (the training targets). */
+function exactKeyStrategy(targetKey: string): AutomatedActionStrategy {
+  return {
+    name: `exact:${targetKey}`,
+    summarizeCandidates(_ctx, candidates): AutomatedActionCandidateSummary[] {
+      return candidates
+        .filter((c) => candidateKey(c) === targetKey)
+        .map((candidate) => ({ candidate, family: candidate.family, heuristics: [],
+                               stableKey: candidateKey(candidate) }));
+    },
+  };
+}
+
 /** Strategy that yields no candidates -> planner falls back to passTurn. */
 const PASS_STRATEGY: AutomatedActionStrategy = {
   name: "pass",
@@ -426,14 +450,17 @@ class Session {
   }
 
   /** Execute one chosen action key from the current state (no observe). */
+  /** Execute exactly `key` (no fallback to other candidates). Returns true only
+   *  if the requested key was the one that executed. */
   private executeKey(key: string): boolean {
     const server = this.engine.asServer();
     if (key === PASS_KEY) {
       const res = server.takeAutomatedActionForCurrentActor({ strategy: PASS_STRATEGY, searchCaps: SEARCH_CAPS });
       return Boolean(res.finalResult?.success) || res.fallbackTaken === "passTurn";
     }
-    const res = server.takeAutomatedActionForCurrentActor({ strategy: chooseKeyStrategy(key), searchCaps: SEARCH_CAPS });
-    return Boolean(res.finalResult?.success);
+    const res = server.takeAutomatedActionForCurrentActor({ strategy: exactKeyStrategy(key), searchCaps: SEARCH_CAPS });
+    const executed = res.selectedCandidate ? candidateKey(res.selectedCandidate) : (res.fallbackTaken ?? null);
+    return executed === key && Boolean(res.finalResult?.success);
   }
 
   /** Execute a batch of descent paths IN-PROCESS from a root snapshot, returning
@@ -443,11 +470,22 @@ class Session {
     const out: any[] = [];
     for (const keys of paths) {
       this.restore(rootId);
-      for (const key of keys) {
+      let invalid = false;
+      let failedAtDepth = -1;
+      for (let d = 0; d < keys.length; d += 1) {
         if (this.observe0Done()) break;   // stop early if a path hit terminal
-        this.executeKey(key);
+        if (!this.executeKey(keys[d]!)) {  // exact execution failed -> path is invalid
+          invalid = true;
+          failedAtDepth = d;
+          break;
+        }
       }
-      out.push(this.observe());
+      const obs: any = this.observe();
+      if (invalid) {
+        obs.invalidPath = true;            // search must NOT treat this as a real leaf
+        obs.failedAtDepth = failedAtDepth;
+      }
+      out.push(obs);
     }
     return out;
   }
@@ -496,6 +534,35 @@ class Session {
       lore: pc.lore, ink: pc.ink, hand: pc.hand, turn: pc.turn,
     });
     if (this.history.length > HIST_MAX) this.history.shift();
+  }
+
+  /** Grammar-gap proof: enumerate the current actor's decision three ways —
+   *  capped automation (what the bot uses), uncapped automation (Botcana-style
+   *  full enumeration), and the engine's RAW legal move ids (the true grammar) —
+   *  so we can measure where each yields legal moves the others miss. */
+  grammarProbe(): any {
+    const server: any = this.engine.asServer();
+    const actor = this.currentActor();
+    if (!actor) return { actor: null };
+    const fam = (r: any) => Array.from(new Set((r.candidates ?? []).map((c: any) => c.family)));
+    // unsupported-shape = a legal move the automation CANNOT represent (true grammar
+    // gap); overflow-skip = combinations dropped by a cap; validation-reject = illegal.
+    const unsupported = (r: any) => (r.unsupportedSkips ?? [])
+      .filter((d: any) => d.kind === "unsupported-shape")
+      .map((d: any) => ({ family: d.family, reason: String(d.reason).slice(0, 80) }));
+    const overflow = (r: any) => (r.unsupportedSkips ?? []).filter((d: any) => d.kind === "overflow-skip").length;
+    const capped = server.enumerateAutomatedActionsForCurrentActor({ searchCaps: SEARCH_CAPS });
+    const uncapped = server.enumerateAutomatedActionsForCurrentActor({ searchCaps: BIG_CAPS });
+    const board: any = this.engine.getBoard(viewFor(actor));
+    return {
+      actor, turn: board.turnNumber ?? 0, phase: board.phase ?? null, status: board.status,
+      cappedCount: (capped.candidates ?? []).length, cappedFamilies: fam(capped),
+      cappedOverflow: overflow(capped),
+      uncappedCount: (uncapped.candidates ?? []).length, uncappedFamilies: fam(uncapped),
+      uncappedOverflow: overflow(uncapped),
+      unsupported: unsupported(uncapped),        // the true grammar gap (if any)
+      validationRejects: (uncapped.validationSkips ?? []).length,
+    };
   }
 
   observe() {
@@ -548,6 +615,7 @@ class Session {
         ready: !c.exerted,
         keywords: c.keywords ?? [],
         definitionId: c.definitionId ?? null,
+        name: c.fullName ?? c.name ?? null,   // human-readable (verbose logging)
         hidden: Boolean(c.hidden),
       });
     }
@@ -642,6 +710,10 @@ function handle(req: any): any {
     case "observe": {
       if (!session) return { ok: false, error: "no session" };
       return { ok: true, obs: session.observe() };
+    }
+    case "grammar_probe": {
+      if (!session) return { ok: false, error: "no session" };
+      return { ok: true, probe: session.grammarProbe() };
     }
     case "step": {
       if (!session) return { ok: false, error: "no session" };

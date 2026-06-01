@@ -103,3 +103,114 @@ class DecisionTracer:
         if self._fh is not None:
             self._fh.close()
             self._fh = None
+
+
+# --- human-readable live play-by-play ----------------------------------------
+
+def _short(name: str | None, fallback: str = "?") -> str:
+    if not name:
+        return fallback
+    return name.split(" - ")[0][:18]   # drop the version subtitle, cap length
+
+
+def _describe(act: dict, names: dict) -> str:
+    """One-line readable description of a chosen action."""
+    fam = act.get("family", "?")
+    src = _short(names.get(act.get("src")), act.get("src") or "")
+    tgts = [_short(names.get(t), t) for t in (act.get("targets") or []) if t]
+    ct = act.get("costType")
+    if fam == "playCard":
+        s = f'play {src}'
+        if ct and ct not in ("none", "standard"):
+            s += f'[{ct}]'
+        if act.get("singers"):
+            s += f' (sing x{len(act["singers"])})'
+        if tgts:
+            s += " → " + ", ".join(tgts)
+        return s
+    if fam == "putCardIntoInkwell":
+        return f'ink {src}'
+    if fam == "quest":
+        return f'quest {src}'
+    if fam == "challenge":
+        return f'challenge {src} → {tgts[0] if tgts else "?"}'
+    if fam == "moveCharacterToLocation":
+        return f'move {src} → {tgts[0] if tgts else "?"}'
+    if fam == "activateAbility":
+        return f'ability {src}#{act.get("abilityIndex", "")}'
+    if fam in ("resolveBag", "resolveEffect"):
+        extra = f' choice={act["choice"]}' if act.get("choice", -1) >= 0 else ""
+        return f'{fam}{extra}'
+    if fam == "alterHand":
+        return "mulligan"
+    if fam == "passTurn":
+        return "pass"
+    return fam
+
+
+class GameLogger:
+    """Verbose, human-readable play-by-play with three independent outputs, so
+    EVERY game can be captured even when only one worker streams to the terminal:
+
+      * `to_stdout` — print live (single-process clean narrative);
+      * `sink(line)` — ship the line elsewhere (parallel worker 0 -> main queue);
+      * `file_path`  — append every line to a per-worker file (ALL workers), so a
+        full record of every game survives regardless of what the terminal shows.
+
+    `tail -f <file_path>` lets you watch any individual worker's narrative."""
+
+    def __init__(self, enabled: bool = True, to_stdout: bool = False,
+                 sink=None, file_path: str | None = None) -> None:
+        self.enabled = enabled
+        self._stdout = to_stdout
+        self._sink = sink
+        self._file = None
+        if enabled and file_path:
+            os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+            self._file = open(file_path, "a")
+
+    def _emit(self, line: str) -> None:
+        if not self.enabled:
+            return
+        if self._stdout:
+            print(line, flush=True)
+        if self._sink is not None:
+            self._sink(line)
+        if self._file is not None:
+            self._file.write(line + "\n")
+            self._file.flush()
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def game_start(self, gid: str, p1: str, p2: str) -> None:
+        self._emit(f"\n┌─ game {gid}  |  P1 {p1}  vs  P2 {p2}")
+
+    def game_end(self, winner, turn) -> None:
+        w = "draw" if winner is None else str(winner)
+        self._emit(f"└─ result: {w}  (turn {turn})")
+
+    def decision(self, obs: dict, res, chosen_idx: int, result: dict) -> None:
+        if not self.enabled:
+            return
+        names = {c.get("id"): c.get("name") for c in obs.get("cards", []) or []}
+        legal = obs.get("legal", [])
+        if not (0 <= chosen_idx < len(legal)):
+            return
+        act = legal[chosen_idx]
+        plabel = f"P{int(obs.get('selfIdx', 0)) + 1}"
+        turn, phase = obs.get("turn", "?"), (obs.get("phase") or "")[:5]
+        # post-action public counts from the event the bridge just appended
+        post = (result.get("obs", {}) or {}).get("history") or []
+        ev = post[-1] if post else {}
+        lore = ev.get("lore", ["?", "?"]); ink = ev.get("ink", ["?", "?"]); hand = ev.get("hand", ["?", "?"])
+        import numpy as _np
+        N = int(_np.asarray(res.root.N)[chosen_idx]) if res.root.N.size > chosen_idx else 0
+        Q = float(_np.asarray(res.root.q_values())[chosen_idx]) if res.root.N.size > chosen_idx else 0.0
+        pi = float(res.pi[chosen_idx]) if res.pi.size > chosen_idx else 0.0
+        ng = "" if result.get("matched", True) else " ⚠fallback"
+        self._emit(f"  T{turn:<2} {phase:<5} {plabel} │ {_describe(act, names):<34} │ "
+                   f"lore {lore[0]}:{lore[1]} ink {ink[0]}:{ink[1]} hand {hand[0]}:{hand[1]} │ "
+                   f"π{pi:.2f} N{N} Q{Q:+.2f}{ng}")

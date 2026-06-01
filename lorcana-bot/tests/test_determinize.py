@@ -89,6 +89,29 @@ def test_importance_weighting_belief_inert_uniform_reweights():
     assert w[n_hi >= 2].mean() > w[n_hi <= 1].mean()
 
 
+def test_stuck_step_guard():
+    """The stuck-game guard aborts the infinite no-progress loop (repeated failed
+    steps on a frozen state) but never on healthy successful play."""
+    from engine.serialization import stuck_step
+    # frozen + failing -> abort on the 3rd consecutive
+    s = m = 0
+    s, m, ab = stuck_step(s, m, True, False); assert not ab
+    s, m, ab = stuck_step(s, m, True, False); assert not ab
+    s, m, ab = stuck_step(s, m, True, False); assert ab
+    # a single advancing step (state changed, success) resets the counters
+    s, m, ab = stuck_step(s, m, False, True); assert s == 0 and m == 0 and not ab
+    # healthy play (always advancing) never aborts
+    s = m = 0
+    for _ in range(50):
+        s, m, ab = stuck_step(s, m, False, True); assert not ab
+    # backstop: frozen but "successful" for 12 steps still aborts
+    s = m = 0
+    ab = False
+    for _ in range(12):
+        s, m, ab = stuck_step(s, m, True, True)
+    assert ab
+
+
 def test_belief_tracker_seeds_reweights_reseeds():
     # #9 PROOF: BeliefTracker maintains a persistent SIR filter across decisions,
     # reseeds when the opponent's pool changes, reweights+resamples otherwise.

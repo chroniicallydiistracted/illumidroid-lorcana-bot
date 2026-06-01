@@ -32,6 +32,55 @@ def test_reset_has_legal_actions(engine):
     assert obs["actor"] is not None
 
 
+def test_runpaths_exact_executes_requested_key(engine):
+    """A legal stable key descended by search executes exactly (no invalidPath)."""
+    obs = engine.reset("t-exact")
+    snap = engine.snapshot()
+    key = obs["legal"][0]["stableKey"]
+    [leaf] = engine.run_paths(snap, [[key]])
+    assert not leaf.get("invalidPath"), "a legal key must execute exactly, not fall back"
+    engine.drop_snapshot(snap)
+
+
+def test_runpaths_rejects_missing_key_no_fallback(engine):
+    """A bogus stable key must NOT silently execute a fallback candidate — the
+    leaf is flagged invalidPath so search can discard it (doc #1 / #7)."""
+    obs = engine.reset("t-bogus")
+    snap = engine.snapshot()
+    [leaf] = engine.run_paths(snap, [["challenge:NOTAREALCARD:ALSOBOGUS"]])
+    assert leaf.get("invalidPath") is True, "missing key should flag invalidPath, not fall back"
+    assert leaf.get("failedAtDepth") == 0
+    engine.drop_snapshot(snap)
+
+
+def test_automation_grammar_gap_is_only_known_residual(engine):
+    """PROOF (regression): the automation enumeration the bot uses covers the FULL
+    engine grammar EXCEPT a known, measured residual — nested triggered-ability
+    (bag/effect) resolution ("exceeds the v1 automation support matrix"), ~0.1% of
+    decisions (see illumidroid_grammar_gap_proof.md). The invariant we guard: any
+    `unsupported-shape` the engine reports must be in the resolveBag/resolveEffect
+    family. If a NEW gap appears in a real action family (playCard/quest/challenge/
+    ability/ink/move) — the only case that would justify the raw getAvailableMoves
+    grammar — this test fails."""
+    KNOWN_GAP = {"resolveBag", "resolveEffect"}
+    decisions = 0
+    bad: list[dict] = []
+    for g in range(4):
+        obs = engine.reset(f"grammar-gap-{g}")
+        steps = 0
+        while not obs.get("done") and steps < 120:
+            pr = engine.grammar_probe()
+            if pr.get("actor"):
+                decisions += 1
+                for d in pr.get("unsupported", []):
+                    if d.get("family") not in KNOWN_GAP:
+                        bad.append(d)
+            obs = engine.step_auto("best")["obs"]
+            steps += 1
+    assert decisions > 50, "expected to sample real decisions"
+    assert not bad, f"NEW grammar gap outside the known bag/effect residual: {bad[:5]}"
+
+
 def test_same_seed_identical_scripted_trajectory():
     """Same seed => bit-identical trajectory across two independent processes."""
     def trace(seed, n=40):

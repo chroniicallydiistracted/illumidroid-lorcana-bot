@@ -148,6 +148,30 @@ HIST_FEAT_DIM = (
 AUX_DIM = 3   # [final_lore_self, final_lore_opp, turns_to_end], all in [0, 1]
 
 
+def game_fingerprint(obs: dict) -> tuple:
+    """Cheap public-state fingerprint to detect a non-advancing (stuck) game:
+    some states enumerate zero automation candidates AND reject passTurn (e.g.
+    Reckless must-challenge), so a synthetic pass loops forever. If this tuple is
+    unchanged across consecutive steps, the game made no progress."""
+    p = obs.get("players", {})
+    s, o = p.get("self", {}), p.get("opp", {})
+    legal = obs.get("legal", [])
+    return (obs.get("turn"), obs.get("phase"), obs.get("actor"),
+            s.get("lore"), o.get("lore"), s.get("handCount"), o.get("handCount"),
+            s.get("play"), o.get("play"), len(legal))
+
+
+def stuck_step(stuck: int, same: int, frozen: bool, success: bool) -> tuple[int, int, bool]:
+    """Advance the stuck-game counters and decide whether to abort. `frozen` =
+    the public fingerprint did not change this step; `success` = the engine
+    reported the step executed. Abort on 3 consecutive frozen+failed steps
+    (precise — successful play resets it) or 12 consecutive frozen states (a
+    backstop for the rare "succeeds but doesn't advance")."""
+    stuck = stuck + 1 if (frozen and not success) else 0
+    same = same + 1 if frozen else 0
+    return stuck, same, (stuck >= 3 or same >= 12)
+
+
 def aux_targets(final_obs: dict, self_idx: int, turn: int) -> np.ndarray:
     """Consequence targets for a sample taken at `turn` by the player whose
     canonical index is `self_idx`, given the game's final observation."""

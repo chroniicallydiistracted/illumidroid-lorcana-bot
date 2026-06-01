@@ -16,6 +16,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from engine.serialization import NUM_CATEGORIES, CAND_FEAT_DIM, NUM_ROLES, AUX_DIM
 
@@ -48,6 +49,8 @@ class PolicyHead(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers, enable_nested_tensor=False)
         self.scorer = nn.Linear(d_model, 1)
+        # max candidate-rows per transformer call (bounds VRAM regardless of B*A)
+        self._row_chunk = 1024
 
     def forward(self, trunk_vec: torch.Tensor, token_reps: torch.Tensor,
                 action_cat: torch.Tensor, action_mask: torch.Tensor,
@@ -81,9 +84,25 @@ class PolicyHead(nn.Module):
         pad[..., 1] = cand_named_id <= 0
         pad[..., 2:] = ~cand_tok_mask
 
-        out = self.encoder(seq.reshape(B * A, S, D),
-                           src_key_padding_mask=pad.reshape(B * A, S))      # [B*A,S,D]
-        cls_out = out[:, 0, :].reshape(B, A, D)                             # CLS per candidate
+        # Run the per-candidate transformer over (B*A) rows. A (legal candidates)
+        # can spike to hundreds after search-cap widening; collate pads the whole
+        # batch to the largest A, so a single high-candidate state would otherwise
+        # blow the FF activation past VRAM. Bound peak memory by processing fixed-
+        # size row chunks, and gradient-checkpoint each chunk in training (recompute
+        # in backward) so peak is independent of B*A.
+        flat = seq.reshape(B * A, S, D)
+        flat_pad = pad.reshape(B * A, S)
+        rows = B * A
+        chunk = self._row_chunk
+        cls_parts = []
+        for s0 in range(0, rows, chunk):
+            sl = slice(s0, min(s0 + chunk, rows))
+            if self.training:
+                o = checkpoint(self.encoder, flat[sl], None, flat_pad[sl], use_reentrant=False)
+            else:
+                o = self.encoder(flat[sl], src_key_padding_mask=flat_pad[sl])
+            cls_parts.append(o[:, 0, :])                                    # CLS only
+        cls_out = torch.cat(cls_parts, dim=0).reshape(B, A, D)
         logits = self.scorer(cls_out).squeeze(-1)                          # [B,A]
         return logits.masked_fill(~action_mask, NEG_INF)
 

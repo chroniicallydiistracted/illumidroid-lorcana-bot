@@ -14,6 +14,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue as _queue
+import time
 
 import numpy as np
 
@@ -27,12 +28,13 @@ def _worker(cfg: dict, q) -> None:
         import torch
         torch.set_num_threads(1)
         from engine.bridge import LorcanaEngine
-        from engine.serialization import encode_obs, encode_belief, aux_targets
+        from engine.serialization import (encode_obs, encode_belief, aux_targets,
+                                           game_fingerprint, stuck_step)
         from network.model import LorcanaNet
         from search.ismcts import BISMCTS, SearchConfig
         from search.evaluator import NetEvaluator, BeliefEvaluator
         from search.belief_filter import BeliefTracker
-        from training.trace import DecisionTracer
+        from training.trace import DecisionTracer, GameLogger
 
         ck = torch.load(cfg["ckpt"], map_location="cpu")
         net = LorcanaNet(d_model=ck["d_model"], n_layers=ck["layers"])
@@ -45,6 +47,13 @@ def _worker(cfg: dict, q) -> None:
         per = sc.simulations * (n_worlds if use_belief else 1)
         tracer = DecisionTracer(cfg.get("trace_dir", ""), f"r{cfg.get('round', 0)}-w{wid}",
                                 enabled=cfg.get("trace", False))
+        # EVERY worker logs its full play-by-play to its own file (so all games
+        # are captured); only worker 0 ALSO streams live to the main process so
+        # the terminal stays one coherent narrative.
+        _tdir = cfg.get("trace_dir") or ""
+        glog = GameLogger(enabled=cfg.get("watch", False),
+                          file_path=os.path.join(_tdir, f"game-w{wid}.log") if _tdir else None,
+                          sink=(lambda line: q.put(("log", line))) if wid == 0 else None)
         with LorcanaEngine(timeout=300) as engine:
             deck_ids = [d["id"] for d in engine.list_decks()]
             mcts = BISMCTS(engine, NetEvaluator(net), sc, rng)
@@ -53,9 +62,13 @@ def _worker(cfg: dict, q) -> None:
                 i, j = rng.choice(len(deck_ids), 2, replace=False)
                 p1, p2 = deck_ids[int(i)], deck_ids[int(j)]
                 obs = engine.reset(f"{cfg['seed']}-{g}", p1, p2)
+                glog.game_start(f"{cfg['seed']}-{g}", p1, p2)
                 tracker = BeliefTracker(rng=rng) if use_belief else None
                 pending = []
                 steps = 0
+                stuck = same = 0
+                last_fp = None
+                aborted = False
                 while not obs.get("done") and steps < 400:
                     legal = obs.get("legal", [])
                     actor = obs.get("actor")
@@ -70,6 +83,8 @@ def _worker(cfg: dict, q) -> None:
                     obs = result["obs"]
                     if tracer.enabled:
                         tracer.log(dec_obs, res, a, game_id=f"{cfg['seed']}-{g}", executed=result)
+                    if glog.enabled:
+                        glog.decision(dec_obs, res, a, result)
                     clean = result.get("success", True) and (
                         result.get("matched", True) or result.get("executed") == "passTurn")
                     # skip mundane decisions (forced / single legal action): no
@@ -83,21 +98,34 @@ def _worker(cfg: dict, q) -> None:
                     decs += 1
                     if decs % 5 == 0:
                         q.put(("stat", wid, sims, decs, games))
+                    # stuck-game guard (see run.py): abort + discard non-advancing games
+                    fp = game_fingerprint(obs)
+                    stuck, same, abort = stuck_step(stuck, same, fp == last_fp,
+                                                    result.get("success", True))
+                    last_fp = fp
+                    if abort:
+                        aborted = True
+                        q.put(("error", wid, f"game {cfg['seed']}-{g} aborted: stuck at "
+                                             f"turn {obs.get('turn')} (no progress) — discarded"))
+                        break
                 winner = obs.get("winner")
+                glog.game_end("stuck" if aborted else winner, obs.get("turn"))
                 games += 1
-                samples = [(e, pi, (0.0 if winner is None else (1.0 if str(winner) == str(ac) else -1.0)),
-                            b, aux_targets(obs, si, tn))
-                           for (e, pi, ac, b, si, tn) in pending]
+                samples = [] if aborted else [
+                    (e, pi, (0.0 if winner is None else (1.0 if str(winner) == str(ac) else -1.0)),
+                     b, aux_targets(obs, si, tn))
+                    for (e, pi, ac, b, si, tn) in pending]
                 q.put(("samples", samples))
-                q.put(("game", wid, winner, p1, p2))
+                q.put(("game", wid, winner, p1, p2, mcts._invalid_leaves))
                 q.put(("stat", wid, sims, decs, games))
     except Exception as e:  # surface worker crashes instead of hanging the round
         q.put(("error", wid, str(e)[:200]))
     finally:
-        try:
-            tracer.close()
-        except (NameError, AttributeError):
-            pass
+        for _c in ("tracer", "glog"):
+            try:
+                locals()[_c].close()
+            except (NameError, AttributeError, KeyError):
+                pass
         q.put(("done", wid))
 
 
@@ -121,8 +149,11 @@ def generate_round_parallel(ckpt_path: str, n_actors: int, worker_cfg: dict,
         procs.append(p)
 
     per_worker: dict[int, tuple] = {}     # wid -> (sims, decs, games)
+    invalid_by_worker: dict[int, int] = {}  # wid -> cumulative search invalid leaves
     samples: list = []
     done: set = set()
+    stall_timeout = max(2 * int(worker_cfg.get("engine_timeout", 300)), 600)
+    last_progress = time.time()
     try:
         while len(done) < n_actors:
             try:
@@ -131,7 +162,14 @@ def generate_round_parallel(ckpt_path: str, n_actors: int, worker_cfg: dict,
                 # liveness guard: a crashed worker can't hang the round forever
                 if not any(p.is_alive() for p in procs):
                     break
+                # watchdog: a worker hung *outside* an IPC (the bridge's own RPC
+                # timeout handles in-IPC hangs) must not stall the round forever.
+                if time.time() - last_progress > stall_timeout:
+                    monitor.event(f"round watchdog: no progress for {stall_timeout}s — "
+                                  f"terminating {sum(p.is_alive() for p in procs)} stuck worker(s)")
+                    break
                 continue
+            last_progress = time.time()
             kind = msg[0]
             if kind == "stat":
                 _, wid, s, d, g = msg
@@ -139,10 +177,13 @@ def generate_round_parallel(ckpt_path: str, n_actors: int, worker_cfg: dict,
             elif kind == "samples":
                 samples.extend(msg[1])
             elif kind == "game":
-                _, wid, winner, p1, p2 = msg
+                _, wid, winner, p1, p2, invalid = msg
+                invalid_by_worker[wid] = invalid
                 monitor.update(last=f"w{wid} {p1[:10]} v {p2[:10]} -> {winner or 'draw'}")
             elif kind == "error":
                 monitor.event(f"worker {msg[1]} error: {msg[2]}")
+            elif kind == "log":           # live play-by-play from the focus worker
+                print(msg[1], flush=True)
             elif kind == "done":
                 done.add(msg[1])
             rs = sum(v[0] for v in per_worker.values())
@@ -155,6 +196,10 @@ def generate_round_parallel(ckpt_path: str, n_actors: int, worker_cfg: dict,
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
+    invalid_total = sum(invalid_by_worker.values())
+    if invalid_total:
+        monitor.event(f"search exact-exec mismatches this round: {invalid_total} "
+                      f"(invalid leaves dropped — should be ~0)")
     rs = sum(v[0] for v in per_worker.values())
     rd = sum(v[1] for v in per_worker.values())
     rg = sum(v[2] for v in per_worker.values())

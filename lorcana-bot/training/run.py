@@ -16,6 +16,10 @@ from __future__ import annotations
 import os
 import sys
 
+# Reduce CUDA allocator fragmentation BEFORE importing torch: on long runs the
+# reserved pool crept to the 8GB cap (8.5/8.6GB) and spilled to slow host memory.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # make `engine`, `network`, `search`, `training` importable from any cwd
 _BOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BOT not in sys.path:
@@ -28,14 +32,14 @@ import numpy as np
 import torch
 
 from engine.bridge import LorcanaEngine
-from engine.serialization import encode_obs, encode_belief, aux_targets
+from engine.serialization import encode_obs, encode_belief, aux_targets, game_fingerprint, stuck_step
 from network.model import LorcanaNet
 from search.ismcts import BISMCTS, SearchConfig
 from search.evaluator import NetEvaluator, BeliefEvaluator
 from search.belief_filter import BeliefTracker
 from training.learner import Learner, ReplayBuffer, Sample
 from training.monitor import LiveMonitor
-from training.trace import DecisionTracer
+from training.trace import DecisionTracer, GameLogger
 from training.exploitability import deck_pair, gauntlet
 from training.league import NetPlayer, ScriptedPlayer
 
@@ -46,14 +50,19 @@ def _outcome(winner, actor) -> float:
     return 1.0 if str(winner) == str(actor) else -1.0
 
 
-def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worlds, tracer=None):
+def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worlds,
+                  tracer=None, logger=None):
     mcts = BISMCTS(engine, NetEvaluator(net), cfg, rng)
     belief = BeliefEvaluator(net) if use_belief else None
     tracker = BeliefTracker(rng=rng) if use_belief else None  # persistent SIR belief
     p1, p2 = deck_pair(rng, deck_ids)
     obs = engine.reset(seed, p1, p2)
+    if logger is not None:
+        logger.game_start(str(seed), p1, p2)
     pending: list[tuple] = []
     steps = 0
+    stuck = same = 0
+    last_fp = None
     per_decision = cfg.simulations * (n_worlds if use_belief else 1)
     while not obs.get("done") and steps < 400:
         legal = obs.get("legal", [])
@@ -71,8 +80,22 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
         obs = result["obs"]
         if tracer is not None:
             tracer.log(dec_obs, res, a, game_id=str(seed), executed=result)
+        if logger is not None:
+            logger.decision(dec_obs, res, a, result)
         steps += 1
         mon.add(sims=per_decision, decisions=1)
+        # stuck-game guard: a state that won't advance (zero-candidate / pass
+        # rejected) would otherwise loop to the 400-step cap, stalling the worker
+        # and poisoning the buffer. Trip on repeated FAILED steps on a frozen
+        # state (precise — won't fire on legit successful sequences), with a high
+        # pure-repeat backstop for the rare "succeeds but doesn't advance" case.
+        fp = game_fingerprint(obs)
+        stuck, same, abort = stuck_step(stuck, same, fp == last_fp, result.get("success", True))
+        last_fp = fp
+        if abort:
+            mon.event(f"game {seed} aborted: no progress (stuck at turn "
+                      f"{obs.get('turn')} {obs.get('phase')}) — discarding")
+            return [], "stuck", p1, p2
         # only record the sample if the engine executed exactly the chosen action
         # (a failed/fallback execution would attach the target to a different line)
         clean = result.get("success", True) and (
@@ -85,6 +108,10 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
             pending.append((encode_obs(dec_obs), res.pi.copy(), dec_actor, encode_belief(dec_obs),
                             int(dec_obs.get("selfIdx", 0)), int(dec_obs.get("turn", 0))))
     winner = obs.get("winner")
+    if logger is not None:
+        logger.game_end(winner, obs.get("turn"))
+    if mcts._invalid_leaves:
+        mon.event(f"search exact-exec mismatches this game: {mcts._invalid_leaves} (should be ~0)")
     samples = [Sample(enc=e, pi=pi, z=_outcome(winner, ac), belief=b,
                       aux=aux_targets(obs, si, tn)) for (e, pi, ac, b, si, tn) in pending]
     return samples, winner, p1, p2
@@ -106,14 +133,17 @@ def main() -> None:
                     help="parallel self-play worker processes (1 = single-process)")
     ap.add_argument("--games-per-actor", type=int, default=1, help="games each actor plays per round")
     ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--train-batch", type=int, default=96,
-                    help="learner minibatch (8GB-safe with the history+candidate+aux heads; "
-                         "larger can spill to slow host memory on this card)")
+    ap.add_argument("--train-batch", type=int, default=64,
+                    help="learner minibatch (8GB-safe; the candidate transformer is row-chunked "
+                         "+ gradient-checkpointed so high-candidate states don't OOM)")
     ap.add_argument("--rounds", type=int, default=0, help="0 = run forever (Ctrl-C to stop)")
     ap.add_argument("--bc-games", type=int, default=6, help="fair behaviour-clone warmup games (0 to skip)")
     ap.add_argument("--eval-every", type=int, default=5, help="rounds between gauntlet evals (0 = never)")
     ap.add_argument("--trace", action="store_true",
                     help="write per-decision JSONL traces (candidate priors/visits/Q) to <out>/traces/")
+    ap.add_argument("--watch", action="store_true",
+                    help="stream a live, human-readable play-by-play (actions/turns/decisions). "
+                         "Cleanest with --actors 1; in parallel only worker 0's game is shown.")
     ap.add_argument("--out", type=str, default=os.path.join(_BOT, "checkpoints", "run.pt"))
     ap.add_argument("--device", type=str, default="auto")
     args = ap.parse_args()
@@ -156,6 +186,12 @@ def main() -> None:
                             enabled=args.trace and args.actors <= 1)
     if args.trace:
         mon.event(f"decision tracing -> {trace_dir}/")
+    # live play-by-play. Single-process prints + logs to a file; parallel workers
+    # each log to their own file (ALL games captured) and worker 0 also streams live.
+    glog = GameLogger(enabled=args.watch and args.actors <= 1, to_stdout=True,
+                      file_path=os.path.join(trace_dir, "game-main.log"))
+    if args.watch:
+        mon.event(f"watch mode: live play-by-play (worker 0) + per-worker logs in {trace_dir}/game-w*.log")
 
     def save_to(path):
         torch.save({"model": {k: v.cpu() for k, v in net.state_dict().items()},
@@ -200,7 +236,8 @@ def main() -> None:
                     wcfg = {"bot_root": _BOT, "sims": args.sims, "batch": args.batch,
                             "n_worlds": args.n_worlds, "use_belief": use_belief,
                             "games": args.games_per_actor, "depth": args.depth,
-                            "trace": args.trace, "trace_dir": trace_dir, "round": rounds_done}
+                            "trace": args.trace, "trace_dir": trace_dir, "round": rounds_done,
+                            "watch": args.watch}
                     raw, rs, rd, rg = generate_round_parallel(work_ckpt, args.actors, wcfg,
                                                               mon, base, rounds_done,
                                                               base_buffer=len(buf))
@@ -212,7 +249,7 @@ def main() -> None:
                     for g in range(args.games_per_actor):
                         s, winner, p1, p2 = selfplay_game(engine, net, cfg, f"sp{rounds_done}-{g}",
                                                           rng, mon, deck_ids, use_belief, args.n_worlds,
-                                                          tracer=tracer)
+                                                          tracer=tracer, logger=glog)
                         buf.extend(s)
                         mon.add(games=1)
                         mon.update(buffer=len(buf), last=f"{p1[:12]} v {p2[:12]} -> {winner or 'draw'}")
@@ -224,6 +261,8 @@ def main() -> None:
                 mon.update(loss=st.get("loss"), losses=st or None)
                 rounds_done += 1
                 save()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()   # release per-round cached blocks (anti-creep)
                 if args.eval_every and rounds_done % args.eval_every == 0:
                     mon.update(phase="eval")
                     # release cached training blocks so the eval search (belief, GPU)
@@ -245,6 +284,7 @@ def main() -> None:
         mon.event("interrupted — saving checkpoint")
     finally:
         tracer.close()
+        glog.close()
         save()
         mon.stop()
         print(f"\nsaved -> {args.out}", flush=True)

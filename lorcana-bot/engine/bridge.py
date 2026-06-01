@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -55,6 +56,13 @@ class LorcanaEngine:
     # -- low-level rpc --------------------------------------------------------
     def _read(self) -> dict:
         assert self._proc.stdout is not None
+        # Bound the wait: a hung Bun engine (pathological game state / effect loop)
+        # would otherwise block readline() forever, leaving the worker alive-but-
+        # stuck so the round never completes (observed: 0 sims/s for 30+ min).
+        ready, _, _ = select.select([self._proc.stdout], [], [], self.timeout)
+        if not ready:
+            self._proc.kill()   # don't leave a wedged subprocess around
+            raise BridgeError(f"engine RPC timed out after {self.timeout}s (engine hung)")
         line = self._proc.stdout.readline()
         if not line:
             err = self._proc.stderr.read() if self._proc.stderr else ""
@@ -91,6 +99,10 @@ class LorcanaEngine:
 
     def observe(self) -> dict:
         return self._rpc({"op": "observe"})["obs"]
+
+    def grammar_probe(self) -> dict:
+        """Grammar-gap proof: capped vs uncapped automation vs raw legal moves."""
+        return self._rpc({"op": "grammar_probe"})["probe"]
 
     def step(self, stable_key: str) -> dict:
         """Execute a chosen legal action. Returns the full step result."""

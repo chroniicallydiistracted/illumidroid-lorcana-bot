@@ -73,6 +73,7 @@ class BISMCTS:
         self.evaluator = evaluator
         self.cfg = config or SearchConfig()
         self.rng = rng or np.random.default_rng()
+        self._invalid_leaves = 0   # exact-execution mismatches seen by search (diagnostic)
 
     def _evaluate_and_expand(self, node: InfoSetNode) -> float:
         """Expand a leaf with priors+value. Returns net value (leaf actor POV)."""
@@ -234,7 +235,14 @@ class BISMCTS:
                         leaf = InfoSetNode(leaf_obs_list[i])
                         parent.children[la] = leaf
                         created[(id(parent), la)] = leaf
-                        if leaf.terminal or leaf.n_actions == 0:
+                        if leaf_obs_list[i].get("invalidPath"):
+                            # exact-execution failed on this path: distrust the leaf,
+                            # mark it a dead neutral node (not re-expanded), value 0.
+                            leaf.terminal = True
+                            leaf.expanded = True
+                            leaf.leaf_value = 0.0
+                            self._invalid_leaves += 1
+                        elif leaf.terminal or leaf.n_actions == 0:
                             leaf.expanded = True
                             leaf.leaf_value = 0.0
                         else:
@@ -328,7 +336,16 @@ class BISMCTS:
             leaf_obs = self.engine.run_paths(root_snap, [keys])[0]
             leaf = InfoSetNode(leaf_obs)
             parent.children[leaf_action] = leaf
-            leaf_v = self._evaluate_and_expand(leaf)
+            if leaf_obs.get("invalidPath"):
+                # exact-execution failed somewhere on this path: do NOT trust the
+                # leaf (it's a different line than the tree chose). Mark it a dead
+                # neutral node so it isn't re-expanded; back up a neutral value.
+                leaf.terminal = True
+                leaf.expanded = True
+                leaf.leaf_value = leaf_v = 0.0
+                self._invalid_leaves += 1
+            else:
+                leaf_v = self._evaluate_and_expand(leaf)
 
         # backup: each node gets the leaf value from *its own* actor's POV
         for n, a in path:
