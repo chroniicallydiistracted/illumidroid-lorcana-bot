@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from network.trunk import Trunk
-from network.heads import PolicyHead, ValueHead, BeliefHead
+from network.heads import PolicyHead, ValueHead, BeliefHead, AuxHead
 
 
 def to_tensor_batch(batch: dict, device: torch.device) -> dict:
@@ -36,6 +36,7 @@ class LorcanaNet(nn.Module):
         self.policy = PolicyHead(d_model)
         self.value = ValueHead(d_model, n_atoms=n_atoms)
         self.belief = BeliefHead(d_model)   # Phase 2 third head (leak-free)
+        self.aux = AuxHead(d_model)         # auxiliary consequence head (race/clock)
 
     def forward(self, batch: dict) -> dict:
         trunk_vec, token_reps = self.trunk(batch)
@@ -53,6 +54,7 @@ class LorcanaNet(nn.Module):
             "policy_logits": policy_logits,     # [B, A] (illegal = -inf)
             "value_logits": value_logits,       # [B, n_atoms]
             "value": self.value.expected(value_logits),  # [B]
+            "aux_logits": self.aux(trunk_vec),  # [B, AUX_DIM] (race/clock consequences)
         }
         if "belief_ids" in batch:
             # candidate identity embeddings reuse the trunk's identity vocabulary

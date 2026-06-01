@@ -81,6 +81,8 @@ class LiveMonitor:
             parts.append(f"p {ls['policy']:.2f}")
         if "value" in ls:
             parts.append(f"v {ls['value']:.2f}")
+        if "aux" in ls:
+            parts.append(f"aux {ls['aux']:.3f}")
         if "belief" in ls:
             sep = ls.get("belief_sep")
             parts.append(f"bel {ls['belief']:.2f}" + (f"/{sep:+.2f}" if sep is not None else ""))

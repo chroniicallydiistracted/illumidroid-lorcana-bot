@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from engine.bridge import LorcanaEngine
-from engine.serialization import encode_obs, encode_belief
+from engine.serialization import encode_obs, encode_belief, aux_targets
 from network.model import LorcanaNet
 from search.ismcts import BISMCTS, SearchConfig
 from search.evaluator import NetEvaluator, BeliefEvaluator
@@ -82,9 +82,11 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
         # dilutes the buffer / biases the prior toward trivial lines.
         trivial = len(legal) <= 1 or dec_obs.get("forced")
         if clean and not trivial and dec_actor is not None and len(res.pi) == len(legal):
-            pending.append((encode_obs(dec_obs), res.pi.copy(), dec_actor, encode_belief(dec_obs)))
+            pending.append((encode_obs(dec_obs), res.pi.copy(), dec_actor, encode_belief(dec_obs),
+                            int(dec_obs.get("selfIdx", 0)), int(dec_obs.get("turn", 0))))
     winner = obs.get("winner")
-    samples = [Sample(enc=e, pi=pi, z=_outcome(winner, ac), belief=b) for (e, pi, ac, b) in pending]
+    samples = [Sample(enc=e, pi=pi, z=_outcome(winner, ac), belief=b,
+                      aux=aux_targets(obs, si, tn)) for (e, pi, ac, b, si, tn) in pending]
     return samples, winner, p1, p2
 
 
@@ -104,9 +106,9 @@ def main() -> None:
                     help="parallel self-play worker processes (1 = single-process)")
     ap.add_argument("--games-per-actor", type=int, default=1, help="games each actor plays per round")
     ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--train-batch", type=int, default=128,
-                    help="learner minibatch (8GB-safe with the history+candidate transformers; "
-                         "256 can spill to slow host memory on this card)")
+    ap.add_argument("--train-batch", type=int, default=96,
+                    help="learner minibatch (8GB-safe with the history+candidate+aux heads; "
+                         "larger can spill to slow host memory on this card)")
     ap.add_argument("--rounds", type=int, default=0, help="0 = run forever (Ctrl-C to stop)")
     ap.add_argument("--bc-games", type=int, default=6, help="fair behaviour-clone warmup games (0 to skip)")
     ap.add_argument("--eval-every", type=int, default=5, help="rounds between gauntlet evals (0 = never)")
@@ -203,8 +205,8 @@ def main() -> None:
                                                               mon, base, rounds_done,
                                                               base_buffer=len(buf))
                     base["sims"] += rs; base["decisions"] += rd; base["games"] += rg
-                    for (e, pi, z, b) in raw:
-                        buf.add(Sample(enc=e, pi=pi, z=z, belief=b))
+                    for (e, pi, z, b, aux) in raw:
+                        buf.add(Sample(enc=e, pi=pi, z=z, belief=b, aux=aux))
                     mon.update(buffer=len(buf))
                 else:
                     for g in range(args.games_per_actor):
@@ -224,8 +226,13 @@ def main() -> None:
                 save()
                 if args.eval_every and rounds_done % args.eval_every == 0:
                     mon.update(phase="eval")
+                    # release cached training blocks so the eval search (belief, GPU)
+                    # doesn't stack on top of them and spill to slow host memory.
+                    learner._reference = None
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     evalp = NetPlayer("main", net, SearchConfig(simulations=args.sims, depth_limit=3,
-                                      batch_size=args.batch), record=False, use_belief=use_belief,
+                                      batch_size=min(args.batch, 16)), record=False, use_belief=use_belief,
                                       n_worlds=args.n_worlds, greedy=True, rng=rng)
                     anchors = [ScriptedPlayer("fairBest", "fairBest"),
                                ScriptedPlayer("fairAggro", "fairAggro")]

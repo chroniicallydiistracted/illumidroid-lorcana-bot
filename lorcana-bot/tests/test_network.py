@@ -55,6 +55,7 @@ def test_forward_and_masking():
     assert out["policy_logits"].shape == (2, 5)
     assert out["value_logits"].shape == (2, 51)
     assert out["value"].shape == (2,)
+    assert out["aux_logits"].shape == (2, 3)   # final_lore_self/opp + turns_left
     assert torch.all(out["value"] >= -1.0) and torch.all(out["value"] <= 1.0)
 
     priors, values = net.infer(batch)

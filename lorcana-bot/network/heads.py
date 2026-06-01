@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from engine.serialization import NUM_CATEGORIES, CAND_FEAT_DIM, NUM_ROLES
+from engine.serialization import NUM_CATEGORIES, CAND_FEAT_DIM, NUM_ROLES, AUX_DIM
 
 NEG_INF = -1e9
 _NAMED_ROLE = NUM_ROLES   # role id for the named-card token (0..NUM_ROLES-1 are board roles)
@@ -125,6 +125,24 @@ class ValueHead(nn.Module):
         target.scatter_add_(1, lower.unsqueeze(1), w_lower.unsqueeze(1))
         target.scatter_add_(1, upper.unsqueeze(1), w_upper.unsqueeze(1))
         return target
+
+
+class AuxHead(nn.Module):
+    """Auxiliary consequence head (race / clock). Regresses trajectory-derived
+    targets from the trunk vector — final lore for self & opponent and turns until
+    the game ends — so the trunk learns *where the game is going* (race / lethal
+    math), not only the terminal win/loss. Targets come from the realized
+    self-play game (fair, like z); the head is never an input to anything."""
+
+    def __init__(self, d_model: int, hidden: int = 128) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, hidden), nn.GELU(), nn.Linear(hidden, AUX_DIM),
+        )
+
+    def forward(self, trunk_vec: torch.Tensor) -> torch.Tensor:
+        """Returns raw aux logits [B, AUX_DIM] (sigmoid -> [0,1] applied in loss)."""
+        return self.net(trunk_vec)
 
 
 class BeliefHead(nn.Module):

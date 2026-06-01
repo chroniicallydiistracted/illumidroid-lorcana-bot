@@ -27,7 +27,7 @@ def _worker(cfg: dict, q) -> None:
         import torch
         torch.set_num_threads(1)
         from engine.bridge import LorcanaEngine
-        from engine.serialization import encode_obs, encode_belief
+        from engine.serialization import encode_obs, encode_belief, aux_targets
         from network.model import LorcanaNet
         from search.ismcts import BISMCTS, SearchConfig
         from search.evaluator import NetEvaluator, BeliefEvaluator
@@ -76,7 +76,8 @@ def _worker(cfg: dict, q) -> None:
                     # policy signal, only buffer dilution.
                     trivial = len(legal) <= 1 or dec_obs.get("forced")
                     if clean and not trivial and dec_actor is not None and len(res.pi) == len(legal):
-                        pending.append((encode_obs(dec_obs), res.pi.copy(), dec_actor, encode_belief(dec_obs)))
+                        pending.append((encode_obs(dec_obs), res.pi.copy(), dec_actor, encode_belief(dec_obs),
+                                        int(dec_obs.get("selfIdx", 0)), int(dec_obs.get("turn", 0))))
                     steps += 1
                     sims += per
                     decs += 1
@@ -84,8 +85,9 @@ def _worker(cfg: dict, q) -> None:
                         q.put(("stat", wid, sims, decs, games))
                 winner = obs.get("winner")
                 games += 1
-                samples = [(e, pi, (0.0 if winner is None else (1.0 if str(winner) == str(ac) else -1.0)), b)
-                           for (e, pi, ac, b) in pending]
+                samples = [(e, pi, (0.0 if winner is None else (1.0 if str(winner) == str(ac) else -1.0)),
+                            b, aux_targets(obs, si, tn))
+                           for (e, pi, ac, b, si, tn) in pending]
                 q.put(("samples", samples))
                 q.put(("game", wid, winner, p1, p2))
                 q.put(("stat", wid, sims, decs, games))

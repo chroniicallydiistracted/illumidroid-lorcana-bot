@@ -141,6 +141,29 @@ HIST_FEAT_DIM = (
 )
 
 
+# --- auxiliary consequence targets (race / clock) ----------------------------
+# Trajectory-derived regression targets (computed from the FINISHED self-play game,
+# like the outcome z — fair, never an input): where the game ends up and how soon.
+# Shapes the trunk toward race/lethal math rather than only terminal win/loss.
+AUX_DIM = 3   # [final_lore_self, final_lore_opp, turns_to_end], all in [0, 1]
+
+
+def aux_targets(final_obs: dict, self_idx: int, turn: int) -> np.ndarray:
+    """Consequence targets for a sample taken at `turn` by the player whose
+    canonical index is `self_idx`, given the game's final observation."""
+    fs = int(final_obs.get("selfIdx", 0))
+    pl = final_obs.get("players", {})
+    lore = [0.0, 0.0]
+    lore[fs] = pl.get("self", {}).get("lore", 0)
+    lore[1 - fs] = pl.get("opp", {}).get("lore", 0)
+    final_turn = int(final_obs.get("turn", turn))
+    self_lore = lore[self_idx]
+    opp_lore = lore[1 - self_idx]
+    turns_left = max(0, final_turn - int(turn))
+    return np.array([min(self_lore / 20.0, 1.0), min(opp_lore / 20.0, 1.0),
+                     min(turns_left / 20.0, 1.0)], dtype=np.float32)
+
+
 def vocab_id(definition_id: Any, hidden: bool) -> int:
     if hidden or definition_id is None:
         return HIDDEN_ID

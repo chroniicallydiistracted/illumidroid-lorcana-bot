@@ -123,6 +123,26 @@ def test_history_influences_belief_and_is_leak_free():
     assert torch.allclose(o1["belief_logits"], a["belief_logits"], atol=1e-6)
 
 
+def test_aux_head_learns_consequences():
+    """The auxiliary head regresses trajectory-derived race/clock targets and
+    learns them (masked MSE drops; prediction converges to the fixed target)."""
+    net = LorcanaNet(d_model=32, n_layers=2)
+    learner = Learner(net, lr=3e-3)
+    buf = ReplayBuffer()
+    o = _obs(opp_hand=3, opp_deck=5, opp_ink=2)
+    target = np.array([0.8, 0.2, 0.3], np.float32)   # self lore high, opp low, mid clock
+    for _ in range(32):
+        buf.add(Sample(enc=encode_obs(o), pi=np.array([1, 0, 0], np.float32), z=0.0,
+                       belief=encode_belief(o), aux=target.copy()))
+    s0 = learner.train_epoch(buf, batch_size=16)
+    for _ in range(40):
+        s1 = learner.train_epoch(buf, batch_size=16)
+    assert "aux" in s1 and s1["aux"] < s0["aux"]
+    batch = {**collate([encode_obs(o)]), **collate_belief([encode_belief(o)])}
+    pred = torch.sigmoid(net.forward({k: torch.as_tensor(v) for k, v in batch.items()})["aux_logits"])[0]
+    assert float(((pred - torch.as_tensor(target)) ** 2).mean()) < 0.02
+
+
 def test_belief_learns_fixed_pattern():
     """On a fixed obs (so identities carry signal), the head should learn which
     candidates are in hand: loss drops and in-hand/out separation grows."""

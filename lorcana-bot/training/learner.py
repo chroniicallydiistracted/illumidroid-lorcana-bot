@@ -27,6 +27,7 @@ class Sample:
     pi: np.ndarray       # target policy over this obs's legal actions [n]
     z: float             # outcome in [-1, 1] from the acting player's POV
     belief: dict | None = None   # output of encode_belief (Phase 2 target), optional
+    aux: np.ndarray | None = None  # auxiliary consequence targets (race/clock), optional
 
 
 @dataclass
@@ -63,6 +64,16 @@ def _build_batch(samples: list[Sample], device: torch.device):
         bel = collate_belief([s.belief for s in samples])
         for k, v in bel.items():
             tb[k] = torch.as_tensor(v).to(device)
+    # auxiliary consequence targets (optional per sample; masked when absent)
+    from engine.serialization import AUX_DIM
+    aux_target = np.zeros((B, AUX_DIM), dtype=np.float32)
+    aux_mask = np.zeros(B, dtype=np.float32)
+    for i, s in enumerate(samples):
+        if s.aux is not None:
+            aux_target[i] = s.aux
+            aux_mask[i] = 1.0
+    tb["aux_target"] = torch.as_tensor(aux_target).to(device)
+    tb["aux_mask"] = torch.as_tensor(aux_mask).to(device)
     return tb, torch.as_tensor(pi_target).to(device), torch.as_tensor(z).to(device)
 
 
@@ -72,7 +83,7 @@ def _masked_logp(logits, mask):
 
 
 def loss_terms(net, tb, pi_target, z, c_value=1.0, c_entropy=0.0,
-               c_belief=1.0, c_count=0.1, ref_logp=None, c_kl=0.0):
+               c_belief=1.0, c_count=0.1, ref_logp=None, c_kl=0.0, c_aux=0.5):
     out = net.forward(tb)
     logits = out["policy_logits"]                       # [B, A], illegal = -inf
     mask = tb["action_mask"]
@@ -94,6 +105,17 @@ def loss_terms(net, tb, pi_target, z, c_value=1.0, c_entropy=0.0,
         "value": float(value_loss.detach()),
         "entropy": float(entropy.detach()),
     }
+
+    # auxiliary consequence head (race/clock) — masked regression over samples that
+    # carry trajectory-derived targets (self-play; BC warmup samples are skipped).
+    if "aux_target" in tb and "aux_logits" in out:
+        m = tb["aux_mask"]
+        if float(m.sum()) > 0:
+            aux_pred = torch.sigmoid(out["aux_logits"])
+            sq = ((aux_pred - tb["aux_target"]) ** 2).mean(dim=-1)   # per-sample MSE
+            aux_loss = (sq * m).sum() / m.sum().clamp_min(1.0)
+            total = total + c_aux * aux_loss
+            stats["aux"] = float(aux_loss.detach())
 
     # Phase 3: KL trust-region / proximal term to a frozen reference policy
     # (anti-collapse, no catastrophic forgetting — architecture doc §5.1).
@@ -146,7 +168,7 @@ def loss_terms(net, tb, pi_target, z, c_value=1.0, c_entropy=0.0,
 
 class Learner:
     def __init__(self, net, lr=1e-3, weight_decay=1e-4, device=None,
-                 c_value=1.0, c_entropy=0.0, c_belief=1.0, c_kl=0.0):
+                 c_value=1.0, c_entropy=0.0, c_belief=1.0, c_kl=0.0, c_aux=0.5):
         self.device = device or next(net.parameters()).device
         self.net = net.to(self.device)
         self.opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
@@ -154,6 +176,7 @@ class Learner:
         self.c_entropy = c_entropy
         self.c_belief = c_belief
         self.c_kl = c_kl
+        self.c_aux = c_aux
         self._reference = None   # frozen reference net for the KL trust region
 
     def set_reference(self) -> None:
@@ -186,7 +209,7 @@ class Learner:
                     ref_logp = _masked_logp(ref_logits, tb["action_mask"])
             total, stats = loss_terms(self.net, tb, pi_t, z, self.c_value,
                                       self.c_entropy, self.c_belief,
-                                      ref_logp=ref_logp, c_kl=self.c_kl)
+                                      ref_logp=ref_logp, c_kl=self.c_kl, c_aux=self.c_aux)
             self.opt.zero_grad()
             total.backward()
             torch.nn.utils.clip_grad_norm_(self.net.parameters(), 5.0)
