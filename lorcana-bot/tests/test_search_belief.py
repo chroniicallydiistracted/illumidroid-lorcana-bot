@@ -64,3 +64,53 @@ def test_run_belief_pools_and_restores(midgame):
     assert res.stats["root_visits"] == pytest.approx(res.stats["pooled_worlds"] * 5 * 1.0, rel=0.5)
     # engine left on the true root
     assert [a["stableKey"] for a in eng.observe()["legal"]] == before
+
+
+def test_run_infoset_full_ismcts_real_engine(midgame):
+    """Tier-A #2: run_infoset drives one shared info-set tree over root-sampled worlds
+    against the real engine, returns a root policy aligned to the real legal order,
+    and restores the true root. (step_exact must not pollute the public history.)"""
+    import numpy as np
+    from search.belief_filter import BeliefTracker
+    eng, obs = midgame
+    if obs["done"] or len(obs["legal"]) < 2:
+        pytest.skip("no branching decision")
+    net = LorcanaNet(d_model=32, n_layers=2)
+    mcts = BISMCTS(eng, NetEvaluator(net), SearchConfig(simulations=12, depth_limit=3),
+                   rng=np.random.default_rng(0))
+    tracker = BeliefTracker(n_particles=16, rng=np.random.default_rng(0))
+    before = [a["stableKey"] for a in obs["legal"]]
+    res = mcts.run_infoset(obs, BeliefEvaluator(net), tracker, total_simulations=12)
+    assert res.pi.shape == (len(before),)
+    assert abs(float(res.pi.sum()) - 1.0) < 1e-4
+    assert res.stats.get("mode") == "infoset"
+    assert res.stats.get("invalid_sims", 0) == 0      # exact execution, no quarantine
+    assert res.stats.get("unique_infosets", 0) >= 1
+    # engine is back on the true root (same legal set), and history was NOT polluted
+    now = eng.observe()
+    assert [a["stableKey"] for a in now["legal"]] == before
+
+
+def test_run_infoset_root_key_is_world_invariant(midgame):
+    """#2/§8.6 + leak: every root determinization must resolve to the SAME info-set
+    key (the key reads only actor-visible info), so run_infoset's assert_root_invariant
+    holds — a different key would mean hidden info leaked into the key."""
+    import numpy as np
+    from search.infoset import info_set_key
+    eng, obs = midgame
+    if obs["done"]:
+        pytest.skip("ended")
+    self_id = obs["self"]
+    pool = [c["id"] for c in obs["hidden"]["hand"]] + [c["id"] for c in obs["hidden"]["deck"]]
+    hc = obs["players"]["opp"]["handCount"]
+    root = eng.snapshot()
+    k_true = info_set_key(obs, ())
+    rng = np.random.default_rng(1)
+    try:
+        for s in range(5):
+            sub = list(rng.permutation(len(pool))[:hc])
+            world = eng.determinize(self_id, [pool[i] for i in sub], seed=f"w{s}")
+            assert info_set_key(world, ()) == k_true   # world-invariant -> leak-free key
+    finally:
+        eng.restore(root)
+        eng.drop_snapshot(root)

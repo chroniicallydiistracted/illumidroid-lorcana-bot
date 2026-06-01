@@ -12,10 +12,12 @@ CLAUDE.md (Phase 1A) and lorcana-bot-architecture.md §4 for the design.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import select
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,9 +51,24 @@ class LorcanaEngine:
             text=True,
             bufsize=1,
         )
+        # Drain stderr continuously: an undrained PIPE fills (~64KB) and blocks the
+        # Bun process mid-write. A daemon thread keeps it empty and retains the last
+        # lines for error reporting.
+        self._stderr_lines: collections.deque = collections.deque(maxlen=200)
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
         ready = self._read()
         if not ready.get("ready"):
             raise BridgeError(f"server failed to start: {ready}")
+
+    def _drain_stderr(self) -> None:
+        if self._proc.stderr is None:
+            return
+        try:
+            for line in self._proc.stderr:        # blocks per-line; keeps the pipe empty
+                self._stderr_lines.append(line)
+        except (ValueError, OSError):
+            pass                                   # pipe closed on shutdown
 
     # -- low-level rpc --------------------------------------------------------
     def _read(self) -> dict:
@@ -65,7 +82,7 @@ class LorcanaEngine:
             raise BridgeError(f"engine RPC timed out after {self.timeout}s (engine hung)")
         line = self._proc.stdout.readline()
         if not line:
-            err = self._proc.stderr.read() if self._proc.stderr else ""
+            err = "".join(self._stderr_lines)      # drained by the background thread
             raise BridgeError(f"server closed unexpectedly. stderr:\n{err}")
         return json.loads(line)
 
@@ -128,6 +145,12 @@ class LorcanaEngine:
         the root snapshot; return each path's leaf observation. One round-trip
         replaces (paths x path-length) per-step calls — the in-process search."""
         return self._rpc({"op": "run_paths", "root": root_snap, "paths": paths})["obs"]
+
+    def step_exact(self, stable_key: str) -> dict:
+        """Execute exactly `stable_key` from the CURRENT (lane) state WITHOUT mutating
+        public history; returns the next obs (flags `invalidPath` on mismatch). The
+        adaptive single-step transition used by full ISMCTS (`run_infoset`)."""
+        return self._rpc({"op": "step_exact", "stableKey": stable_key})["obs"]
 
     def determinize(self, self_id: str, hand_instance_ids: list[str],
                     seed: str | None = None) -> dict:

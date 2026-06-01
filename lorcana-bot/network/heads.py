@@ -16,41 +16,39 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 from engine.serialization import NUM_CATEGORIES, CAND_FEAT_DIM, NUM_ROLES, AUX_DIM
 
 NEG_INF = -1e9
-_NAMED_ROLE = NUM_ROLES   # role id for the named-card token (0..NUM_ROLES-1 are board roles)
 
 
 class PolicyHead(nn.Module):
-    """Candidate-transformer policy (ACE). Each legal candidate is encoded as a
-    small token set — a CLS token (candidate scalar features + family + trunk),
-    a named-card token, and role-tagged pointers into the trunk's card tokens
-    (source / targets / singers / shift / banish / discard / exert). A shared
-    mini-transformer attends over that set; the CLS output scores the candidate.
-    Scores are softmaxed over the legal set. This distinguishes candidates that
-    share family/src/first-target but differ in singer / shift target / 2nd
-    target / named card / cost cards / destination / optional / choice-index —
-    which the old factored (cat,src,tgt) head collapsed to identical features."""
+    """Candidate-ranking policy (ACE, lightweight). Each legal candidate is scored
+    by an MLP over: its family embedding, its scalar descriptor (`cand_feats` —
+    cost type / singers / targets / optional / choice / destinations), a masked
+    MEAN-POOL of its role-tagged card-token reps (source / targets / singers /
+    shift / banish-discard-exert), the named-card embedding, and the trunk vector.
 
-    def __init__(self, d_model: int, cat_dim: int = 32, n_heads: int = 4,
-                 n_layers: int = 1, ff_mult: int = 2) -> None:
+    This keeps ACE's distinguishing power (candidates differing in singer / shift /
+    2nd target / named card / cost / optional get different features) but replaces
+    the per-candidate TRANSFORMER (attention over leaves×candidates rows — 82% of
+    CPU search time, untrainable on this hardware) with a cheap pool+MLP that is
+    ~50-100x faster per forward. Scores are softmaxed over the legal set."""
+
+    def __init__(self, d_model: int, cat_dim: int = 32, hidden: int = 256) -> None:
         super().__init__()
         self.d_model = d_model
         self.cat_embed = nn.Embedding(NUM_CATEGORIES, cat_dim)
         self.role_embed = nn.Embedding(NUM_ROLES + 1, d_model)   # 0=pad .. NUM_ROLES=named
         self.feat_proj = nn.Linear(CAND_FEAT_DIM, d_model)
-        self.cls_proj = nn.Linear(cat_dim + 2 * d_model, d_model)  # cat + feat + trunk -> CLS
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=n_heads, dim_feedforward=ff_mult * d_model,
-            dropout=0.0, batch_first=True, activation="gelu", norm_first=True,
+        # scorer input: cat + cand_feat(D) + trunk(D) + pooled MEAN(D) + pooled SUM(D) + named(D).
+        # Both mean and sum: mean is order/count-invariant; sum is count/identity-sensitive
+        # so candidates differing by an extra target/singer/cost-card stay distinct.
+        self.scorer = nn.Sequential(
+            nn.Linear(cat_dim + 5 * d_model, hidden), nn.GELU(),
+            nn.Linear(hidden, hidden), nn.GELU(),
+            nn.Linear(hidden, 1),
         )
-        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers, enable_nested_tensor=False)
-        self.scorer = nn.Linear(d_model, 1)
-        # max candidate-rows per transformer call (bounds VRAM regardless of B*A)
-        self._row_chunk = 1024
 
     def forward(self, trunk_vec: torch.Tensor, token_reps: torch.Tensor,
                 action_cat: torch.Tensor, action_mask: torch.Tensor,
@@ -66,44 +64,16 @@ class PolicyHead(nn.Module):
         # gather the trunk-contextualized rep for each candidate pointer -> [B,A,T,D]
         idx = cand_tok_pos.clamp(0, L - 1).unsqueeze(-1).expand(B, A, T, D)
         base = token_reps.unsqueeze(1).expand(B, A, L, D)
-        tok = torch.gather(base, 2, idx) + self.role_embed(cand_tok_role)   # + role
+        tok = torch.gather(base, 2, idx) + self.role_embed(cand_tok_role)   # + role tag
+        m = cand_tok_mask.unsqueeze(-1).to(tok.dtype)                       # [B,A,T,1]
+        tok_sum = (tok * m).sum(2)                                         # [B,A,D] (count/identity-sensitive)
+        pooled = tok_sum / m.sum(2).clamp_min(1.0)                         # masked mean [B,A,D]
 
-        named_tok = (named_emb + self.role_embed.weight[_NAMED_ROLE]).unsqueeze(2)  # [B,A,1,D]
-
-        cat_rep = self.cat_embed(action_cat)                                # [B,A,cat]
-        feat_rep = self.feat_proj(cand_feats)                               # [B,A,D]
-        trunk_rep = trunk_vec.unsqueeze(1).expand(B, A, D)                  # [B,A,D]
-        cls = self.cls_proj(torch.cat([cat_rep, feat_rep, trunk_rep], dim=-1)).unsqueeze(2)
-
-        seq = torch.cat([cls, named_tok, tok], dim=2)                       # [B,A,2+T,D]
-        S = seq.shape[2]
-
-        # key-padding mask (True = ignore): CLS always valid; named iff present
-        pad = torch.ones(B, A, S, dtype=torch.bool, device=seq.device)
-        pad[..., 0] = False
-        pad[..., 1] = cand_named_id <= 0
-        pad[..., 2:] = ~cand_tok_mask
-
-        # Run the per-candidate transformer over (B*A) rows. A (legal candidates)
-        # can spike to hundreds after search-cap widening; collate pads the whole
-        # batch to the largest A, so a single high-candidate state would otherwise
-        # blow the FF activation past VRAM. Bound peak memory by processing fixed-
-        # size row chunks, and gradient-checkpoint each chunk in training (recompute
-        # in backward) so peak is independent of B*A.
-        flat = seq.reshape(B * A, S, D)
-        flat_pad = pad.reshape(B * A, S)
-        rows = B * A
-        chunk = self._row_chunk
-        cls_parts = []
-        for s0 in range(0, rows, chunk):
-            sl = slice(s0, min(s0 + chunk, rows))
-            if self.training:
-                o = checkpoint(self.encoder, flat[sl], None, flat_pad[sl], use_reentrant=False)
-            else:
-                o = self.encoder(flat[sl], src_key_padding_mask=flat_pad[sl])
-            cls_parts.append(o[:, 0, :])                                    # CLS only
-        cls_out = torch.cat(cls_parts, dim=0).reshape(B, A, D)
-        logits = self.scorer(cls_out).squeeze(-1)                          # [B,A]
+        cat_rep = self.cat_embed(action_cat)                               # [B,A,cat]
+        feat_rep = self.feat_proj(cand_feats)                              # [B,A,D]
+        trunk_rep = trunk_vec.unsqueeze(1).expand(B, A, D)                 # [B,A,D]
+        feat = torch.cat([cat_rep, feat_rep, trunk_rep, pooled, tok_sum, named_emb], dim=-1)
+        logits = self.scorer(feat).squeeze(-1)                             # [B,A]
         return logits.masked_fill(~action_mask, NEG_INF)
 
 

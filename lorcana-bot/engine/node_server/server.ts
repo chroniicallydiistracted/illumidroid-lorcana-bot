@@ -393,34 +393,52 @@ class Session {
     return { hand: grab("hand"), deck: grab("deck"), inkwell: grab("inkwell") };
   }
 
-  /** Repartition the opponent's hidden cards into hand/deck per a belief sample,
-   *  then loadState — produces a determinized world the search runs on. Operates
-   *  on the *current* authoritative state (caller restores the true root first). */
+  /** Produce a LEAK-FREE determinized world the search runs on. From the acting
+   *  player's information set, ALL hidden zones must be randomized — otherwise
+   *  search reads privileged info (real inked cards, real future draws) and the
+   *  derived visit-policy/value training labels are contaminated:
+   *    - opponent HAND     = the belief sample (`handInstanceIds`)
+   *    - opponent INKWELL  = sampled (count-consistent) from the remaining hidden pool
+   *    - opponent DECK     = the rest, shuffled
+   *    - SELF DECK         = shuffled (the actor knows its composition, not its draw order)
+   *  Self hand + self inkwell stay as-is (the actor legitimately knows those).
+   *  Operates on the *current* authoritative state (caller restores the true root). */
   determinize(selfId: string, handInstanceIds: string[], seed?: string): boolean {
     const oppId = selfId === CANONICAL_PLAYER_ONE ? CANONICAL_PLAYER_TWO : CANONICAL_PLAYER_ONE;
     const clone: any = structuredClone(this.engine.getAuthoritativeState());
     const zc = clone.ctx.zones.private.zoneCards;
     const sum = clone.ctx.zones.public.zoneSummaries;
-    const handKey = `hand:${oppId}`;
-    const deckKey = `deck:${oppId}`;
-    const pool: string[] = [...(zc[handKey] ?? []), ...(zc[deckKey] ?? [])];
-    const wantHand = handInstanceIds.filter((id) => pool.includes(id));
-    const handSet = new Set(wantHand);
-    let rest = pool.filter((id) => !handSet.has(id));
-    if (seed) {
-      // deterministic shuffle of the residual deck order from the seed
-      let h = 0;
-      for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-      const rng = () => ((h = (h * 1103515245 + 12345) >>> 0) / 0xffffffff);
-      for (let i = rest.length - 1; i > 0; i--) {
+
+    let h = 0;
+    if (seed) for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+    const rng = seed ? () => ((h = (h * 1103515245 + 12345) >>> 0) / 0x100000000) : Math.random;
+    const shuffle = (arr: string[]) => {
+      for (let i = arr.length - 1; i > 0; i--) {
         const j = Math.floor(rng() * (i + 1));
-        [rest[i], rest[j]] = [rest[j], rest[i]];
+        [arr[i], arr[j]] = [arr[j], arr[i]];
       }
-    }
-    zc[handKey] = wantHand;
-    zc[deckKey] = rest;
-    if (sum[handKey]) sum[handKey] = { ...sum[handKey], count: wantHand.length, revision: (sum[handKey].revision || 0) + 1 };
-    if (sum[deckKey]) sum[deckKey] = { ...sum[deckKey], count: rest.length, revision: (sum[deckKey].revision || 0) + 1 };
+      return arr;
+    };
+    const bump = (key: string, count: number) => {
+      if (sum[key]) sum[key] = { ...sum[key], count, revision: (sum[key].revision || 0) + 1 };
+    };
+
+    // ---- opponent: every hidden zone randomized (hand from belief, ink + deck resampled) ----
+    const oHand = `hand:${oppId}`, oDeck = `deck:${oppId}`, oInk = `inkwell:${oppId}`;
+    const inkCount = (zc[oInk] ?? []).length;          // public count; identities hidden
+    const pool: string[] = [...(zc[oHand] ?? []), ...(zc[oDeck] ?? []), ...(zc[oInk] ?? [])];
+    const handSet = new Set(handInstanceIds.filter((id) => pool.includes(id)));
+    const wantHand = [...handSet];
+    const remaining = shuffle(pool.filter((id) => !handSet.has(id)));
+    const newInk = remaining.slice(0, inkCount);
+    const newDeck = remaining.slice(inkCount);
+    zc[oHand] = wantHand; zc[oInk] = newInk; zc[oDeck] = newDeck;
+    bump(oHand, wantHand.length); bump(oInk, newInk.length); bump(oDeck, newDeck.length);
+
+    // ---- searching player: own draw order is unknown to them -> shuffle own deck ----
+    const sDeck = `deck:${selfId}`;
+    if (zc[sDeck]) { zc[sDeck] = shuffle([...zc[sDeck]]); bump(sDeck, zc[sDeck].length); }
+
     this.engine.loadState(clone);
     return true;
   }
@@ -488,6 +506,17 @@ class Session {
       out.push(obs);
     }
     return out;
+  }
+
+  /** Execute exactly `key` from the CURRENT lane state and observe — WITHOUT
+   *  mutating the public history (like runPaths, so search leaves share the root's
+   *  history). Returns the next obs; flags `invalidPath` if the exact key did not
+   *  execute. Used by the adaptive full-ISMCTS lane driver (run_infoset). */
+  stepExact(key: string): any {
+    const ok = this.executeKey(key);
+    const obs: any = this.observe();
+    if (!ok) obs.invalidPath = true;
+    return obs;
   }
 
   private observe0Done(): boolean {
@@ -749,6 +778,10 @@ function handle(req: any): any {
       if (!session) return { ok: false, error: "no session" };
       const paths: string[][] = Array.isArray(req.paths) ? req.paths : [];
       return { ok: true, obs: session.runPaths(Number(req.root), paths) };
+    }
+    case "step_exact": {
+      if (!session) return { ok: false, error: "no session" };
+      return { ok: true, obs: session.stepExact(String(req.stableKey)) };
     }
     case "close":
       return { ok: true, bye: true };

@@ -55,6 +55,7 @@ class SearchConfig:
     n_determinizations: int = 1   # Phase 1: realized world only (Phase 2 hook)
     temperature: float = 1.0
     batch_size: int = 1           # >1 = virtual-loss wave batching (batched GPU inference)
+    assert_root_invariant: bool = False  # full-ISMCTS: every root world must keep the root key
 
 
 @dataclass
@@ -153,7 +154,10 @@ class BISMCTS:
             worlds = sample_worlds(pool_ids, probs, hand_count, n_worlds, proposal, self.rng)
 
         sub_sims = sims_per_world or cfg.simulations
-        sub_cfg = replace(cfg, simulations=sub_sims, dirichlet_eps=0.0)
+        # keep the configured root Dirichlet noise: each world's root selection is
+        # perturbed for exploration, so the pooled visit-policy training target is
+        # explored (forcing eps=0 here silently disabled self-play exploration).
+        sub_cfg = replace(cfg, simulations=sub_sims)
         sub = BISMCTS(self.engine, self.evaluator, sub_cfg, self.rng)
 
         # pool by EXACT stable-key, not positional index: determinization must not
@@ -193,6 +197,68 @@ class BISMCTS:
                             stats={"n_worlds": n_worlds, "pooled_worlds": pooled_worlds,
                                    "total_weight": total_w, "proposal": proposal,
                                    "root_visits": shared.total_visits()})
+
+    def run_infoset(self, root_obs: dict, belief_evaluator, tracker,
+                    total_simulations: int | None = None) -> SearchResult:
+        """Tier-A #2 — full ISMCTS over ONE shared info-set table (replaces the
+        root-pooled per-world PIMC of `run_belief`). Samples ONE posterior world per
+        simulation from the seat's persistent `tracker`, traverses the sampled world
+        adaptively, and shares node-edge statistics by actor-filtered `infoSetKey` —
+        removing strategy-fusion bias. `total_simulations` is the TOTAL sim budget
+        (one world each), NOT n_worlds × sims_per_world.
+
+        Returns a `SearchResult` with `pi` aligned to `root_obs["legal"]` so callers
+        are unchanged. Requires the bridge `step_exact` op + a leak-free Python key.
+        """
+        from dataclasses import replace
+        from search.infoset_tree import run_infoset as _run_infoset
+        from search.engine_sim import EngineSimulator
+
+        legal = root_obs.get("legal", [])
+        if root_obs.get("done") or not legal:
+            return SearchResult(pi=np.zeros(len(legal), np.float32), value=0.0,
+                                root=InfoSetNode(root_obs))
+
+        # seed the seat's posterior for the root, then sample one world per simulation
+        self_id = root_obs.get("self")
+        hand_count = root_obs.get("players", {}).get("opp", {}).get("handCount", 0)
+        pool_ids, probs = belief_evaluator(root_obs)
+        n_seed = max(tracker.n_particles, 1)
+        tracker.worlds(pool_ids, probs, hand_count, n_seed)   # (re)seed/condition the SIR filter
+
+        def sampler(rng):
+            w = tracker.sample_world(rng)
+            if w is None:                          # empty pool -> trivial all-deck world
+                from search.determinize import World
+                return World()
+            return w
+
+        def evaluator(obs):
+            priors, value = self.evaluator(obs)
+            lg = obs.get("legal", [])
+            d = {str(a.get("actionId", a.get("stableKey"))): float(priors[i])
+                 for i, a in enumerate(lg) if i < len(priors)}
+            return d, value
+
+        root_snap = self.engine.snapshot()
+        sim = EngineSimulator(self.engine, root_snap, self_id)
+        cfg = replace(self.cfg, simulations=int(total_simulations or self.cfg.simulations))
+        # the actor-filtered key is engine-independent of the hidden world, so all root
+        # determinizations must yield the root key — assert it to catch any leak.
+        cfg = replace(cfg, assert_root_invariant=True)
+        # the root obs needs a key to register the root node
+        from search.infoset import info_set_key
+        root_obs = {**root_obs, "infoSetKey": info_set_key(root_obs, ())}
+        try:
+            res = _run_infoset(root_obs, sim, sampler, evaluator, cfg, self.rng)
+        finally:
+            self.engine.restore(root_snap)
+            self.engine.drop_snapshot(root_snap)
+
+        # adapt to SearchResult (legacy InfoSetNode root for caller compatibility)
+        node = InfoSetNode(root_obs)
+        return SearchResult(pi=res.pi, value=res.value, root=node, sims=res.sims,
+                            stats={**res.stats, "mode": "infoset"})
 
     def run_batched(self, root_obs: dict) -> SearchResult:
         """Wave-batched PUCT (batched GPU inference). Each wave: descend

@@ -96,6 +96,7 @@ def test_candidates_sharing_family_src_target_get_distinct_logits():
                        "opp": {"lore": 1, "handCount": 5, "deckCount": 52, "inkwell": 2,
                                "discard": 0, "play": 0}},
            "cards": cards, "legal": legal}
+    torch.manual_seed(0)
     net = LorcanaNet(d_model=32, n_layers=2)
     net.eval()
     batch = collate([encode_obs(obs)])

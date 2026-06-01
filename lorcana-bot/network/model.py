@@ -100,3 +100,28 @@ class LorcanaNet(nn.Module):
             probs = self.belief.normalize_to_count(probs, tb["belief_mask"],
                                                    tb["belief_handcount"].float())
         return probs.cpu().numpy()
+
+    @torch.no_grad()
+    def belief_probs_structured(self, batch: dict, device: torch.device | None = None,
+                                normalize: bool = True
+                                ) -> tuple[np.ndarray, np.ndarray]:
+        """numpy belief batch -> (hand_probs [B,P], inkwell_probs [B,P]).
+
+        The inkwell channel (Tier-A #5/§5.3) must be active for the joint 3-zone
+        determinization sampler. Hand probs normalize to `belief_handcount`; inkwell
+        probs normalize to `belief_inkcount` when present (else raw sigmoid).
+        """
+        device = device or next(self.parameters()).device
+        self.eval()
+        tb = to_tensor_batch(batch, device)
+        out = self.forward(tb)
+        mask = tb["belief_mask"].float()
+        hand = torch.sigmoid(out["belief_logits"]) * mask
+        ink = torch.sigmoid(out["belief_logits_ink"]) * mask
+        if normalize and "belief_handcount" in tb:
+            hand = self.belief.normalize_to_count(hand, tb["belief_mask"],
+                                                  tb["belief_handcount"].float())
+        if normalize and "belief_inkcount" in tb:
+            ink = self.belief.normalize_to_count(ink, tb["belief_mask"],
+                                                 tb["belief_inkcount"].float())
+        return hand.cpu().numpy(), ink.cpu().numpy()

@@ -51,10 +51,13 @@ def _outcome(winner, actor) -> float:
 
 
 def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worlds,
-                  tracer=None, logger=None):
+                  tracer=None, logger=None, full_ismcts=False):
     mcts = BISMCTS(engine, NetEvaluator(net), cfg, rng)
     belief = BeliefEvaluator(net) if use_belief else None
-    tracker = BeliefTracker(rng=rng) if use_belief else None  # persistent SIR belief
+    # #4: ONE persistent SIR belief tracker PER SEAT, not a single shared/overwritten
+    # one. Each seat's posterior is over ITS opponent's hidden zones, carried across
+    # that seat's decisions (the single-stream loop alternates seats).
+    trackers: dict = {} if use_belief else {}
     p1, p2 = deck_pair(rng, deck_ids)
     obs = engine.reset(seed, p1, p2)
     if logger is not None:
@@ -70,8 +73,13 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
         if not legal:
             break
         if use_belief:
-            res = mcts.run_belief(obs, belief, n_worlds=n_worlds,
-                                  sims_per_world=cfg.simulations, tracker=tracker)
+            tracker = trackers.setdefault(obs.get("self"), BeliefTracker(rng=rng))
+            if full_ismcts:
+                res = mcts.run_infoset(obs, belief, tracker,
+                                       total_simulations=cfg.simulations * n_worlds)
+            else:
+                res = mcts.run_belief(obs, belief, n_worlds=n_worlds,
+                                      sims_per_world=cfg.simulations, tracker=tracker)
         else:
             res = mcts.run(obs)
         dec_obs, dec_actor = obs, actor
@@ -96,6 +104,12 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
             mon.event(f"game {seed} aborted: no progress (stuck at turn "
                       f"{obs.get('turn')} {obs.get('phase')}) — discarding")
             return [], "stuck", p1, p2
+        # turn cap: a game neither side can close (grinds to turn 40+) wastes huge
+        # compute and stalls the round. It is NOT a real terminal, so discard it
+        # rather than train value/aux from the cutoff (consistent with stuck games).
+        if obs.get("turn", 0) > 35:
+            mon.event(f"game {seed}: turn cap (turn>35, no side closed) — discarding")
+            return [], "turncap", p1, p2
         # only record the sample if the engine executed exactly the chosen action
         # (a failed/fallback execution would attach the target to a different line)
         clean = result.get("success", True) and (
@@ -120,15 +134,21 @@ def selfplay_game(engine, net, cfg, seed, rng, mon, deck_ids, use_belief, n_worl
 def main() -> None:
     ap = argparse.ArgumentParser(description="Lorcana bot self-play + training (GPU, batched, monitored)")
     ap.add_argument("--init", type=str, default="", help="resume from checkpoint (defines arch)")
-    ap.add_argument("--d-model", type=int, default=512, help="trunk width (default 512 ~13M params)")
-    ap.add_argument("--layers", type=int, default=8)
-    ap.add_argument("--sims", type=int, default=16, help="MCTS sims per (world)")
-    ap.add_argument("--depth", type=int, default=10,
-                    help="search horizon in decision plies (a Lorcana turn is many plies; "
-                         "was 4 — too shallow to clear a turn). Deeper = stronger but slower.")
-    ap.add_argument("--batch", type=int, default=32, help="leaf-batch / virtual-loss wave size")
-    ap.add_argument("--n-worlds", type=int, default=4, help="belief determinizations per decision")
+    ap.add_argument("--d-model", type=int, default=256,
+                    help="trunk width. 256x4 (~3M) is CPU-actor-tractable; the old 512x8 (16M) "
+                         "made each decision ~14s and starved learning.")
+    ap.add_argument("--layers", type=int, default=4)
+    ap.add_argument("--sims", type=int, default=8, help="MCTS sims per (world)")
+    ap.add_argument("--depth", type=int, default=4,
+                    help="search horizon in decision plies. Higher = stronger but slower.")
+    ap.add_argument("--batch", type=int, default=16, help="leaf-batch / virtual-loss wave size")
+    ap.add_argument("--n-worlds", type=int, default=2, help="belief determinizations per decision")
     ap.add_argument("--no-belief", action="store_true")
+    ap.add_argument("--full-ismcts", action="store_true",
+                    help="Tier-A #2: ONE shared info-set tree over root-sampled worlds "
+                         "(removes strategy fusion). Correctness-first: ~1 IPC/transition, "
+                         "slower than the run_belief PIMC default until the batched lane RPC "
+                         "lands. total sims/decision = --sims × --n-worlds.")
     ap.add_argument("--actors", type=int, default=6,
                     help="parallel self-play worker processes (1 = single-process)")
     ap.add_argument("--games-per-actor", type=int, default=1, help="games each actor plays per round")
@@ -237,7 +257,7 @@ def main() -> None:
                             "n_worlds": args.n_worlds, "use_belief": use_belief,
                             "games": args.games_per_actor, "depth": args.depth,
                             "trace": args.trace, "trace_dir": trace_dir, "round": rounds_done,
-                            "watch": args.watch}
+                            "watch": args.watch, "full_ismcts": args.full_ismcts}
                     raw, rs, rd, rg = generate_round_parallel(work_ckpt, args.actors, wcfg,
                                                               mon, base, rounds_done,
                                                               base_buffer=len(buf))
@@ -249,7 +269,8 @@ def main() -> None:
                     for g in range(args.games_per_actor):
                         s, winner, p1, p2 = selfplay_game(engine, net, cfg, f"sp{rounds_done}-{g}",
                                                           rng, mon, deck_ids, use_belief, args.n_worlds,
-                                                          tracer=tracer, logger=glog)
+                                                          tracer=tracer, logger=glog,
+                                                          full_ismcts=args.full_ismcts)
                         buf.extend(s)
                         mon.add(games=1)
                         mon.update(buffer=len(buf), last=f"{p1[:12]} v {p2[:12]} -> {winner or 'draw'}")

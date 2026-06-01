@@ -89,7 +89,18 @@ class ParticleFilter:
         if not self.particles:
             return []
         idx = self.rng.choice(len(self.particles), size=n, replace=True, p=self.weights)
-        return [World(hand_ids=list(self.particles[i]), weight=1.0) for i in idx]
+        return [World(opponent_hand_ids=tuple(self.particles[i]), weight=1.0, rho=1.0)
+                for i in idx]
+
+    def sample_world(self, rng: np.random.Generator | None = None) -> World | None:
+        """Draw ONE world from the current posterior (with replacement). This is the
+        full-ISMCTS contract (#4/§5.2): one world per simulation, ρ == 1 because the
+        particle weights already encode the posterior."""
+        if not self.particles:
+            return None
+        r = rng or self.rng
+        i = int(r.choice(len(self.particles), p=self.weights))
+        return World(opponent_hand_ids=tuple(self.particles[i]), weight=1.0, rho=1.0)
 
 
 class BeliefTracker:
@@ -112,18 +123,25 @@ class BeliefTracker:
         self.rng = rng or np.random.default_rng()
         self.pf: ParticleFilter | None = None
         self.pool_set: frozenset[str] = frozenset()
+        self.hand_count: int = -1
         self.reseeds = 0
         self.updates = 0
+        self.action_updates = 0    # observed-opponent-action corrections applied
 
     def worlds(self, pool_ids: list[str], probs: np.ndarray, hand_count: int,
                n_worlds: int) -> list[World]:
         pset = frozenset(pool_ids)
         prob_of = {cid: float(p) for cid, p in zip(pool_ids, probs)}
-        if self.pf is None or pset != self.pool_set or not self.pf.particles:
+        # reseed on a new pool OR a changed hand size: after a draw the pool
+        # (hand+deck) is unchanged but the hand count grows, and the filter's hand
+        # cardinality is fixed at construction — stale worlds would keep the old size.
+        if (self.pf is None or pset != self.pool_set
+                or hand_count != self.hand_count or not self.pf.particles):
             # (re)seed from the neural belief proposal — new game or revealed cards
             self.pf = ParticleFilter(pool_ids, hand_count, rng=self.rng)
             self.pf.seed_from_belief(np.asarray(probs, dtype=np.float64), self.n_particles)
             self.pool_set = pset
+            self.hand_count = hand_count
             self.reseeds += 1
         else:
             # correction: reweight carried particles by current belief, resample
@@ -136,3 +154,24 @@ class BeliefTracker:
             self.pf.maybe_resample(self.ess_threshold)
             self.updates += 1
         return self.pf.to_worlds(n_worlds)
+
+    def observe_opponent_action(self, likelihood_fn) -> None:
+        """#4 action-likelihood correction. After we OBSERVE an opponent action,
+        reweight each particle by `P(observed action | that world)` and SIR-resample.
+        This conditions the posterior on what the opponent actually did, not just on
+        the current neural belief output (the SIR `correction` step, §2.4/§5.2).
+        `likelihood_fn(hand_id_set) -> float` is supplied by the caller (e.g. the
+        policy net's probability of the observed action in the determinized world)."""
+        if self.pf is None or not self.pf.particles:
+            return
+        self.pf.reweight(likelihood_fn)
+        self.pf.maybe_resample(self.ess_threshold)
+        self.action_updates += 1
+
+    def sample_world(self, rng: np.random.Generator | None = None):
+        """Draw ONE world from the maintained posterior (full-ISMCTS, one per sim)."""
+        return self.pf.sample_world(rng) if self.pf is not None else None
+
+    def ess(self) -> float:
+        """Effective sample size of the current particle set (posterior sharpness)."""
+        return self.pf.ess() if self.pf is not None else 0.0

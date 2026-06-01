@@ -44,6 +44,7 @@ def _worker(cfg: dict, q) -> None:
         sc = SearchConfig(simulations=cfg["sims"], depth_limit=cfg.get("depth", 10), temperature=1.0,
                           dirichlet_eps=0.25, batch_size=cfg["batch"])
         use_belief, n_worlds = cfg["use_belief"], cfg["n_worlds"]
+        full_ismcts = cfg.get("full_ismcts", False)
         per = sc.simulations * (n_worlds if use_belief else 1)
         tracer = DecisionTracer(cfg.get("trace_dir", ""), f"r{cfg.get('round', 0)}-w{wid}",
                                 enabled=cfg.get("trace", False))
@@ -63,7 +64,7 @@ def _worker(cfg: dict, q) -> None:
                 p1, p2 = deck_ids[int(i)], deck_ids[int(j)]
                 obs = engine.reset(f"{cfg['seed']}-{g}", p1, p2)
                 glog.game_start(f"{cfg['seed']}-{g}", p1, p2)
-                tracker = BeliefTracker(rng=rng) if use_belief else None
+                trackers: dict = {}     # #4: one persistent SIR tracker PER SEAT
                 pending = []
                 steps = 0
                 stuck = same = 0
@@ -74,9 +75,16 @@ def _worker(cfg: dict, q) -> None:
                     actor = obs.get("actor")
                     if not legal:
                         break
-                    res = (mcts.run_belief(obs, belief, n_worlds=n_worlds,
-                                           sims_per_world=sc.simulations, tracker=tracker)
-                           if use_belief else mcts.run(obs))
+                    if use_belief:
+                        tracker = trackers.setdefault(obs.get("self"), BeliefTracker(rng=rng))
+                        if full_ismcts:
+                            res = mcts.run_infoset(obs, belief, tracker,
+                                                   total_simulations=sc.simulations * n_worlds)
+                        else:
+                            res = mcts.run_belief(obs, belief, n_worlds=n_worlds,
+                                                  sims_per_world=sc.simulations, tracker=tracker)
+                    else:
+                        res = mcts.run(obs)
                     dec_obs, dec_actor = obs, actor
                     a = int(rng.choice(len(res.pi), p=res.pi)) if res.pi.sum() > 0 else 0
                     result = engine.step(legal[a]["stableKey"])
@@ -107,6 +115,10 @@ def _worker(cfg: dict, q) -> None:
                         aborted = True
                         q.put(("error", wid, f"game {cfg['seed']}-{g} aborted: stuck at "
                                              f"turn {obs.get('turn')} (no progress) — discarded"))
+                        break
+                    if obs.get("turn", 0) > 35:   # turn cap: not a real terminal -> discard
+                        aborted = True
+                        q.put(("error", wid, f"game {cfg['seed']}-{g}: turn cap (turn>35) — discarded"))
                         break
                 winner = obs.get("winner")
                 glog.game_end("stuck" if aborted else winner, obs.get("turn"))

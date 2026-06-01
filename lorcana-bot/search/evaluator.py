@@ -74,6 +74,34 @@ class BeliefEvaluator:
         return pool_ids, probs[0, :len(pool_ids)].astype(np.float32)
 
 
+class StructuredBeliefEvaluator:
+    """Maps an observation to (full hidden pool ids, P(in hand), P(in inkwell)).
+
+    Tier-A #5/§5.3: the joint 3-zone determinization sampler needs BOTH the hand
+    and inkwell channels over the complete opponent hidden pool (hand + deck +
+    inkwell), in the order `encode_belief` uses. Leak-free: these arrays are derived
+    from the belief head, never fed into the trunk.
+    """
+
+    def __init__(self, net, device=None) -> None:
+        self.net = net
+        self.device = device or next(net.parameters()).device
+
+    def __call__(self, obs: dict) -> tuple[list[str], np.ndarray, np.ndarray]:
+        hidden = obs.get("hidden") or {}
+        pool_ids = ([c["id"] for c in hidden.get("hand", [])]
+                    + [c["id"] for c in hidden.get("deck", [])]
+                    + [c["id"] for c in hidden.get("inkwell", [])])
+        if not pool_ids:
+            z = np.zeros(0, dtype=np.float32)
+            return [], z, z
+        bel = encode_belief(obs)
+        batch = {**collate([encode_obs(obs)]), **collate_belief([bel])}
+        hand, ink = self.net.belief_probs_structured(batch, self.device, normalize=True)
+        n = len(pool_ids)
+        return pool_ids, hand[0, :n].astype(np.float32), ink[0, :n].astype(np.float32)
+
+
 class UniformBeliefEvaluator:
     """Belief-free baseline: every pool card equally likely to be in hand."""
 

@@ -81,6 +81,42 @@ def test_automation_grammar_gap_is_only_known_residual(engine):
     assert not bad, f"NEW grammar gap outside the known bag/effect residual: {bad[:5]}"
 
 
+def test_determinize_is_leak_free(engine):
+    """#1: a determinized world must RANDOMIZE the opponent's hidden inkwell (real
+    inked identities are hidden), not leave the real ones in place. Across seeds
+    the sampled inkwell varies, while the full hidden multiset is conserved."""
+    import pytest
+    obs = engine.reset("det-leak")
+    for _ in range(50):
+        if obs.get("done"):
+            break
+        h = obs.get("hidden", {})
+        if len(h.get("inkwell", [])) >= 1 and len(h.get("deck", [])) >= 3:
+            break
+        obs = engine.step_auto("best")["obs"]
+    hid = obs.get("hidden", {})
+    if len(hid.get("inkwell", [])) < 1 or len(hid.get("deck", [])) < 3:
+        pytest.skip("did not reach a state with opp inkwell + deck")
+    self_id = obs["self"]
+    real_ink = frozenset(c["id"] for c in hid["inkwell"])
+    hand_ids = [c["id"] for c in hid["hand"]]
+    allpool = set(hand_ids) | {c["id"] for c in hid["deck"]} | set(real_ink)
+    snap = engine.snapshot()
+    samples = []
+    for s in ("a", "b", "c", "d"):
+        engine.restore(snap)
+        engine.determinize(self_id, hand_ids, seed=s)
+        dh = engine.observe()["hidden"]
+        ink = frozenset(c["id"] for c in dh["inkwell"])
+        assert len(ink) == len(real_ink)                       # count-consistent
+        full = set(c["id"] for c in dh["hand"]) | {c["id"] for c in dh["deck"]} | set(ink)
+        assert full == allpool                                 # conservation (no leak in/out)
+        samples.append(ink)
+    engine.drop_snapshot(snap)
+    # leak-free: the inkwell is RESAMPLED, so it is not always the real inked set
+    assert any(s != real_ink for s in samples), "opp inkwell never randomized (leak)"
+
+
 def test_same_seed_identical_scripted_trajectory():
     """Same seed => bit-identical trajectory across two independent processes."""
     def trace(seed, n=40):

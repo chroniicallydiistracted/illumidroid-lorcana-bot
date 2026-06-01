@@ -100,6 +100,7 @@ def frozen_net_copy(net):
 class _PairStat:
     games: int = 0
     wins_a: int = 0  # wins for the lexicographically-first id in the key
+    wins_b: int = 0  # wins for the second id (draws = games - wins_a - wins_b)
 
 
 class League:
@@ -126,10 +127,11 @@ class League:
         key, a_first = self._key(a_id, b_id)
         st = self._pairs.setdefault(key, _PairStat())
         st.games += 1
-        if winner_id is not None:
-            first_id = key[0]
-            if winner_id == first_id:
+        if winner_id is not None:                 # draws increment neither (counted as 0.5 later)
+            if winner_id == key[0]:
                 st.wins_a += 1
+            else:
+                st.wins_b += 1
         self._update_elo(a_id, b_id, winner_id)
 
     def _update_elo(self, a: str, b: str, winner: str | None, k: float = 32.0) -> None:
@@ -145,8 +147,9 @@ class League:
         st = self._pairs.get(key)
         if st is None or st.games == 0:
             return prior
-        wins_main = st.wins_a if main_first else (st.games - st.wins_a)
-        return (wins_main + prior) / (st.games + 1.0)
+        wins_main = st.wins_a if main_first else st.wins_b
+        draws = st.games - st.wins_a - st.wins_b
+        return (wins_main + 0.5 * draws + prior) / (st.games + 1.0)
 
     # -- PFSP -----------------------------------------------------------------
     def pfsp_weights(self, main_id: str, candidates: list[str],

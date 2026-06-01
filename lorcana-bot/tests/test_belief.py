@@ -159,3 +159,25 @@ def test_belief_learns_fixed_pattern():
     assert s1["belief"] < s0["belief"]
     assert s1["belief_sep"] > 0.3                  # clearly separates in-hand cards
     assert s1["belief_count_mae"] < 1.0
+
+
+def test_5_structured_belief_evaluator_hand_and_ink_channels():
+    """#5/§5.3: StructuredBeliefEvaluator returns hand AND inkwell probabilities over
+    the full hidden pool (hand+deck+inkwell), count-consistent, and leak-free."""
+    from search.evaluator import StructuredBeliefEvaluator
+    torch.manual_seed(0)
+    net = LorcanaNet(d_model=32, n_heads=2, n_layers=2)
+    ev = StructuredBeliefEvaluator(net, device=torch.device("cpu"))
+    obs = _obs(opp_hand=3, opp_deck=5, opp_ink=2)
+    pool, hand, ink = ev(obs)
+    assert len(pool) == 10 and hand.shape == (10,) and ink.shape == (10,)
+    # count-consistency: hand mass ~ handCount(3), ink mass ~ inkcount(2)
+    assert abs(hand.sum() - 3) < 0.6
+    assert abs(ink.sum() - 2) < 0.6
+    # leak-free: scrambling opponent hidden identities must NOT change policy/value
+    base = net.infer({**collate([encode_obs(obs)])}, torch.device("cpu"))
+    scrambled = {**obs, "hidden": {"hand": list(reversed(obs["hidden"]["hand"])),
+                                   "deck": obs["hidden"]["deck"],
+                                   "inkwell": obs["hidden"]["inkwell"]}}
+    base2 = net.infer({**collate([encode_obs(scrambled)])}, torch.device("cpu"))
+    assert np.allclose(base[0], base2[0]) and np.allclose(base[1], base2[1])
