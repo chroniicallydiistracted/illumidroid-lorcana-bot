@@ -60,25 +60,108 @@ If the TypeScript oracle appears to conflict with Lorcana rules, do not silently
 rules discrepancy, and only change behavior when the TypeScript oracle and its
 tests are intentionally updated.
 
-## Porting Language Status
+## Selected Rust Stack
 
-The final port language is not locked by old Rust-port notes.
+Rust is the selected port language unless the user explicitly reopens the
+language decision. The chosen stack is documented in:
 
-Before implementing Step 1 of the port, perform and document a language decision
-using the blueprint's constraints:
+```text
+headless_lorcana_engine_porting_blueprint.md
+```
 
-- Exact parity and deterministic replay support.
-- Fast clone/apply/legal-action loops for ML self-play.
-- Safe state ownership and cache invalidation.
-- First-class Python integration for the learner/search stack.
-- Ability to express a large rules engine without hiding fallbacks.
-- Tooling for differential tests, fuzz/property tests, profiling, and CI.
-- Practical maintainability for hundreds of thousands of lines of card/rule
-  behavior.
+Required baseline:
 
-Rust remains a serious candidate, but do not assume it by default. Compare it
-against at least C++, Go, Zig, and a TypeScript/WASM or native-TS optimization
-path before committing.
+- `rust-toolchain.toml` pins Rust `1.96.0`.
+- Cargo workspace, Rust edition `2024`.
+- Pure deterministic core crate first; Python bindings live in a separate thin
+  crate.
+- No async runtime in the core engine.
+- No host RNG in the core engine.
+- No process-global rule caches.
+
+Workspace layout target:
+
+```text
+lorcana-rs/
+  crates/
+    lorcana-schema
+    lorcana-card-ir
+    lorcana-core
+    lorcana-conformance
+    lorcana-py
+    lorcana-cli
+```
+
+Core crate responsibilities:
+
+- `lorcana-schema` maps the TypeScript discriminated-union DSL into Rust
+  enums/structs with Serde.
+- `lorcana-card-ir` loads generated normalized card data; do not hand-port all
+  card files first.
+- `lorcana-core` owns state, zones, deterministic RNG, reducer, rules, effects,
+  legal actions, observation, serialization, and replay.
+- `lorcana-conformance` runs TypeScript-oracle lockstep comparisons.
+- `lorcana-py` exposes batch APIs to Python via PyO3/maturin.
+- `lorcana-cli` provides oracle-freeze, replay, snapshot, diff, and benchmark
+  commands.
+
+Required Rust ecosystem choices:
+
+- Serialization/schema: `serde`, `serde_json`, `indexmap`.
+- Python bridge: `pyo3`, `maturin`; optional `numpy` crate only for dense
+  observation tensor exports.
+- Errors: `thiserror` in libraries, `anyhow` only in CLI/test harnesses.
+- Small ordered collections: `smallvec`.
+- Flags: `bitflags` only where parity does not require raw string lists.
+- Diagnostics: `tracing`.
+- CLI: `clap`.
+- Parallelism: `rayon` only above the deterministic core for independent games,
+  conformance streams, or batch work.
+- Testing: `cargo nextest`, `insta`, `proptest`, `cargo-fuzz` + `arbitrary`,
+  `criterion`, `cargo llvm-cov`, `cargo deny`, `clippy`, `rustfmt`.
+
+Determinism requirements:
+
+- Reproduce `seedrandom@3.0.5` default behavior used by
+  `match-runtime.random-apis.ts`; do not replace it with `rand::StdRng`.
+- Use `rand`/`rand_chacha` only for test data generation, fuzzing, or randomized
+  conformance streams, never as the engine oracle RNG.
+- Do not let `HashMap`/`HashSet` iteration define rules behavior. Use `Vec`,
+  `IndexMap`, or `BTreeMap` when order is observable.
+
+Binding requirements:
+
+- Keep PyO3 out of `lorcana-core`.
+- Expose coarse batch APIs, not one Python call per primitive transition.
+- Release the GIL only around Rust-only work after the binding surface exists
+  and tests prove deterministic behavior.
+
+Avoid:
+
+- `tokio` or any async runtime in the core.
+- C ABI/cffi as the primary Python bridge.
+- Global static-effect or derived-state caches.
+- Performance rewrites before the relevant conformance layer passes.
+
+## Symbol Registry Requirement
+
+Maintain this file throughout port development:
+
+```text
+headless_lorcana_engine_porting_symbol_registry.md
+```
+
+Every implementation change that creates, renames, removes, or changes the
+meaning of a constant, variable, enum, struct/class, function, module, crate,
+command variant, test fixture, generated artifact, or source-of-truth path must
+update the registry in the same change.
+
+The registry is designed for AI developer agents after context compaction. Keep
+it organized, searchable, and explicit. Prefer tables with stable names,
+locations, type/kind, purpose, oracle source, parity notes, and update dates.
+
+Do not treat the registry as optional documentation. If a symbol is needed to
+continue development safely after context loss, it belongs in the registry.
 
 ## Hard Porting Rules
 

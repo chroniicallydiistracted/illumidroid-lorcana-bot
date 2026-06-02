@@ -2935,3 +2935,333 @@ apply(command):
 46. Build TypeScript-vs-port differential harness.
 47. Run full unit, card, replay, legal-action, and full-game simulation parity tests.
 48. Only after parity, redesign internals for performance.
+
+---
+
+# 13. Selected Rust stack
+
+This section records the selected implementation stack for the headless port.
+It does not replace any dependency ordering or conformance requirement above.
+
+Rust is selected because this port is a large, deterministic rules-interpreter
+project where exhaustive enums, strict ownership, fast CPU execution, strong
+test tooling, and Python bindings matter more than rapid prototyping.
+
+The dominant risks are silent rules drift, RNG drift, ordering drift, hidden
+state mutation, and cache invalidation. The stack below is chosen to make those
+risks visible and testable.
+
+## 13.1 Toolchain baseline
+
+Pin the Rust toolchain in `rust-toolchain.toml`.
+
+```toml
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt", "llvm-tools-preview"]
+```
+
+Required baseline:
+
+```text
+Rust version: 1.96.0
+Rust edition: 2024
+Package manager/build: Cargo workspace
+Core runtime: pure Rust library crate
+Python bridge: PyO3/maturin binding crate
+Async runtime: none in core
+Engine RNG: custom TypeScript-oracle-compatible seedrandom implementation
+```
+
+`rustc` and `cargo` must be installed through `rustup` before port
+implementation begins. If a local environment has no Rust toolchain installed,
+that is a setup blocker, not a reason to change the stack.
+
+## 13.2 Workspace layout
+
+Target workspace:
+
+```text
+lorcana-rs/
+  Cargo.toml
+  rust-toolchain.toml
+  crates/
+    lorcana-schema/
+    lorcana-card-ir/
+    lorcana-core/
+    lorcana-conformance/
+    lorcana-py/
+    lorcana-cli/
+```
+
+Crate responsibilities:
+
+| Crate | Responsibility | Must not contain |
+|---|---|---|
+| `lorcana-schema` | Rust enums/structs for card, ability, condition, effect, cost, target, trigger, command, state schema | Engine mutation logic |
+| `lorcana-card-ir` | Generated/normalized card catalog IR loader and validation | Hand-translated full card logic as the first approach |
+| `lorcana-core` | Pure deterministic engine: state, zones, RNG, reducer, flow, queries, derived state, static effects, conditions, targeting, costs, moves, effects, triggers, Bag, replacements, legal actions, observation, serialization, replay | PyO3 types, CLI behavior, TypeScript subprocess control |
+| `lorcana-conformance` | TypeScript-oracle runner, lockstep replay comparison, snapshot canonicalization, legal-action diffing, random legal stream generation | Production engine logic |
+| `lorcana-py` | Thin PyO3/maturin Python extension exposing coarse batch APIs to the ML stack | Rules behavior not delegated to `lorcana-core` |
+| `lorcana-cli` | Oracle freeze, card IR generation, replay, snapshot, diff, conformance, and benchmark commands | Hidden runtime state mutation not available through core APIs |
+
+Keep the port's rules behavior in `lorcana-core`. Other crates wrap, generate,
+test, or expose it.
+
+## 13.3 Core dependency choices
+
+Use a small, explicit dependency set. Add new crates only when they improve
+correctness, observability, or measured performance without obscuring behavior.
+
+| Purpose | Crate/tool | Why this is selected |
+|---|---|---|
+| Serialization/schema | `serde`, `serde_json` | The TypeScript card DSL is discriminated-union JSON-like data; Serde can map it to exhaustive Rust enums/structs. |
+| Order-preserving maps/sets | `indexmap` | Observable order matters for JSON parity, action ordering, trigger ordering, and diagnostics; standard `HashMap` iteration must not define behavior. |
+| Library errors | `thiserror` | Stable, typed error enums for fail-closed engine behavior. |
+| CLI/test harness errors | `anyhow` | Good for tools where preserving context matters more than exposing a typed API. Do not use it inside core rules where exact error classification matters. |
+| Small ordered vectors | `smallvec` | Useful for small target/action/effect lists without heap churn; preserve order explicitly. |
+| Bit flags | `bitflags` | Useful for internal keyword/classification flags only when parity does not require raw string-list representation. |
+| Diagnostics | `tracing` | Structured conformance mismatch and replay diagnostics. |
+| CLI | `clap` | Stable command surface for oracle freeze, replay, diff, and benchmarks. |
+| Parallel independent work | `rayon` | Use only above the deterministic core for independent games, conformance streams, batch observation, or benchmark workloads. |
+| Python extension | `pyo3` | Native Python module bridge for Rust code. Keep it out of `lorcana-core`. |
+| Python package/build | `maturin` | Build and install PyO3 modules into the Python environment. |
+| Dense tensor export | `numpy` | Optional; use only for observation tensors where NumPy transfer is needed. |
+| Property tests | `proptest` | Randomized invariant and legal-action stream tests with shrinking. |
+| Fuzzing | `cargo-fuzz`, `arbitrary` | Structured fuzzing for malformed commands, serialized states, action streams, and parser/generator robustness. |
+| Snapshot tests | `insta` | Canonical state/replay/schema snapshots. |
+| Fast test runner | `cargo nextest` | Faster CI/local test execution and better test reporting than raw `cargo test`. |
+| Benchmarks | `criterion` | Stable microbenchmarks for clone/apply/legal-action/observation after parity. |
+| Coverage | `cargo llvm-cov` | Rust coverage reports for core and conformance suites. |
+| Dependency audit | `cargo deny` | License/security/dependency policy gate. |
+| Lint/format | `clippy`, `rustfmt` | Required quality gates. |
+
+## 13.4 Python and ML integration
+
+Use `lorcana-py` as a thin binding crate.
+
+Required rules:
+
+```text
+PyO3 types do not appear in lorcana-core.
+Python bridge functions call lorcana-core APIs.
+Bindings expose coarse batch APIs, not one Python call per primitive transition.
+The binding layer may release the GIL only around Rust-only work.
+```
+
+Preferred Python-facing API shape:
+
+```text
+new_game_batch(configs) -> handles
+clone_batch(handles) -> handles
+legal_actions_batch(handles, player_ids) -> encoded action batches
+apply_actions_batch(handles, actions) -> transition results
+observations_batch(handles, player_ids) -> compact observations / optional NumPy tensors
+serialize_batch(handles) -> bytes or JSON snapshots
+load_batch(snapshots) -> handles
+```
+
+Do not bind every internal helper. Binding too many helpers creates a second API
+surface that can drift from the conformance-tested engine path.
+
+## 13.5 Determinism and ordering rules
+
+The TypeScript engine source currently uses:
+
+```text
+packages/lorcana/lorcana-engine/src/core/runtime/match-runtime.random-apis.ts
+seedrandom(`${seed}:${draws}`)()
+```
+
+with dependency:
+
+```text
+seedrandom@3.0.5
+```
+
+Therefore:
+
+```text
+Do not use rand::StdRng as the engine RNG.
+Do not use rand_chacha as the engine RNG.
+Do not use OS randomness in engine transitions.
+Do not use HashMap or HashSet iteration order for rules-visible behavior.
+```
+
+Required implementation:
+
+```text
+Implement a custom seedrandom-compatible RNG module in lorcana-core.
+Export golden TypeScript RNG vectors during Step 0.
+Test random() output and shuffle order against the TypeScript oracle.
+Track ctx.random.seed and ctx.random.draws exactly.
+```
+
+Allowed uses of Rust RNG crates:
+
+```text
+rand / rand_chacha may generate test cases, fuzz seeds, or randomized legal
+conformance streams. They must never replace the engine's oracle RNG.
+```
+
+Use `Vec`, `IndexMap`, or `BTreeMap` for observed iteration order:
+
+```text
+Vec       = explicit sequence/order from engine logic
+IndexMap  = insertion order matters
+BTreeMap  = stable key order matters
+HashMap   = only for lookup where iteration order cannot affect behavior
+```
+
+## 13.6 State strategy
+
+Start with a simple, correctness-first reducer:
+
+```text
+apply_command(state, command, static_resources) -> TransitionResult
+```
+
+with owned Rust structs and explicit `Clone`.
+
+Do not begin with:
+
+```text
+Persistent data structures as the primary design
+Unsafe arena aliasing
+Undo-log simulation as the only source of truth
+Parallel mutation inside one transition
+```
+
+After layer parity is proven, add a separate optimized simulation lane:
+
+```text
+EngineLane {
+  state
+  undo_log
+  caches
+}
+```
+
+The lane may optimize MCTS apply/undo, but it must be verified against the
+conformance-tested reducer.
+
+## 13.7 Testing and CI commands
+
+Baseline Rust checks once the workspace exists:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo nextest run --workspace
+cargo test --doc --workspace
+cargo llvm-cov nextest --workspace
+cargo deny check
+git diff --check
+```
+
+Conformance checks must compare the Rust port against the frozen TypeScript
+oracle after every command, not only at final game outcome.
+
+Performance checks are allowed only after the relevant parity checks pass:
+
+```bash
+cargo bench --workspace
+```
+
+## 13.8 Explicit non-goals for the Rust stack
+
+Do not use:
+
+```text
+tokio or async runtimes in lorcana-core
+C ABI / cffi as the primary Python bridge
+rand::StdRng for engine transitions
+HashMap iteration for rules behavior
+global static-effect or derived-state caches
+hand-translated full card catalog as the first card integration strategy
+performance-only rewrites before parity
+```
+
+---
+
+# 14. Symbol registry requirement
+
+Maintain this document throughout the port:
+
+```text
+headless_lorcana_engine_porting_symbol_registry.md
+```
+
+The registry exists for AI developer agents that resume after context
+compaction. It must make the current names, constants, variables, functions,
+classes/structs, enums, modules, crates, generated artifacts, source paths, and
+test fixtures discoverable without rereading the entire repository.
+
+## 14.1 When to update it
+
+Update the registry in the same change whenever any port work:
+
+```text
+creates a crate/module/file
+creates or renames a constant
+creates or renames a variable with cross-module meaning
+creates or renames an enum, struct, class, trait, or type alias
+creates or renames a function/method used outside one file
+creates or renames a command/action variant
+creates or renames a serialized field
+creates or renames a test fixture, oracle fixture, snapshot, or generated artifact
+changes the meaning of an existing symbol
+removes or deprecates a symbol
+adds a TypeScript oracle source path that future agents must know
+```
+
+If a future agent would need the name to continue safely after losing context,
+the registry must include it.
+
+## 14.2 Required organization
+
+The registry must stay structured with these sections:
+
+```text
+1. How to use this registry
+2. Source-of-truth documents and oracle paths
+3. Rust workspace crates and module map
+4. Toolchain and dependency constants
+5. TypeScript oracle constants and source symbols
+6. Rust port constants
+7. Runtime state structs/classes/types
+8. Command/action variants
+9. Engine API functions and methods
+10. Serialization, replay, and snapshot artifacts
+11. Test fixtures and conformance corpora
+12. Generated artifacts
+13. Deprecated or quarantined symbols
+14. Update log
+```
+
+Use tables with:
+
+```text
+Symbol / Name
+Kind
+Location
+Purpose
+Oracle source
+Parity notes
+Introduced / updated date
+```
+
+## 14.3 Registry quality bar
+
+The registry must be:
+
+```text
+searchable by exact symbol name
+organized by subsystem
+explicit about TypeScript oracle source paths
+explicit about whether a symbol is planned, implemented, deprecated, or test-only
+kept small enough to scan, but complete enough to continue development
+```
+
+Do not use the registry for prose design discussion. Put design discussion in
+the blueprint; put stable names and symbol facts in the registry.
