@@ -1,7 +1,3 @@
 lorcana-bot-venv/
 .claude
 .codex
-*codex-skills/
-*prompts/
-*scripts/
-*skills/
