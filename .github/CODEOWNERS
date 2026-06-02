@@ -1,0 +1,25 @@
+# Replace YOUR_GITHUB_HANDLE before enabling this file.
+
+AGENTS.md                                           @YOUR_GITHUB_HANDLE
+CLAUDE.md                                           @YOUR_GITHUB_HANDLE
+docs/port/headless_lorcana_engine_porting_blueprint.md        @YOUR_GITHUB_HANDLE
+docs/port/headless_lorcana_engine_porting_symbol_registry.md  @YOUR_GITHUB_HANDLE
+
+.github/**                                          @YOUR_GITHUB_HANDLE
+.claude/**                                          @YOUR_GITHUB_HANDLE
+.codex/**                                           @YOUR_GITHUB_HANDLE
+codex-skills/**                                     @YOUR_GITHUB_HANDLE
+skills/**                                           @YOUR_GITHUB_HANDLE
+scripts/agent/**                                    @YOUR_GITHUB_HANDLE
+docs/port/port-status.md                            @YOUR_GITHUB_HANDLE
+
+lorcana-rs/crates/lorcana-core/**                   @YOUR_GITHUB_HANDLE
+lorcana-rs/crates/lorcana-conformance/**            @YOUR_GITHUB_HANDLE
+lorcana-rs/crates/lorcana-schema/**                 @YOUR_GITHUB_HANDLE
+lorcana-rs/crates/lorcana-card-ir/**                @YOUR_GITHUB_HANDLE
+
+# Oracle package edits require human review.
+lorcana-simulator/packages/lorcana/lorcana-engine/** @YOUR_GITHUB_HANDLE
+lorcana-simulator/packages/lorcana/lorcana-cards/**  @YOUR_GITHUB_HANDLE
+packages/lorcana/lorcana-engine/**                  @YOUR_GITHUB_HANDLE
+packages/lorcana/lorcana-cards/**                   @YOUR_GITHUB_HANDLE

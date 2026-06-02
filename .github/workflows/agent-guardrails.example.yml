@@ -1,0 +1,25 @@
+name: Agent Guardrails
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Git diff check
+        run: git diff --check origin/${{ github.base_ref }}...HEAD
+
+      - name: Agent guardrail suite
+        env:
+          AGENT_BASE_REF: origin/${{ github.base_ref }}
+          AGENT_BLUEPRINT_STEP_NUMBER: ${{ vars.AGENT_BLUEPRINT_STEP_NUMBER || '0' }}
+          SCAN_MODE: block
+        run: |
+          chmod +x scripts/agent/*.sh scripts/agent/*.py || true
+          scripts/agent/run_agent_audit_suite.sh
