@@ -14,7 +14,13 @@ Audited checkpoint: Phase 0 guard complete; Phase 13 baseline installed
 (5 passing probes: 2 Phase-1 + 3 Phase-2; 15 strict expected-red probes); Phase 1
 canonical full hidden-zone `World` boundary complete and audited GO; Phase 2 exact
 structured sampler math and importance semantics complete and audited GO. Phase 3
-full-world bridge RPC or Phase 5 full-world tracker is next.
+full-world bridge RPC is **NO-GO (awaiting re-audit)**: the closure-contract findings
+are addressed + tested — observer-aware protected-facts ledger (actor-visible pins
+SPLIT from engine-integrity refs; projection fails closed; reveal `visibleTo`
+respected; live-ref scan reads map keys), positional deck protection, zone-specific
+opponent-hidden obs redaction with collision-free placeholders, strict admission +
+explicit metadata semantics, staged clone validation incl. reverse-index orphans;
+29 real-engine tests (1 narrow skip). Phase 7 wiring stays BLOCKED until Phase 3 GO.
 See `../CLAUDE.md` for current state + commands, `../lorcana-simulator/lorcana-bot-architecture.md`
 for the design, `PORT-AUDIT.md` for the engine-port analysis, and the phase
 reports in `../lorcana-simulator/phase{1,2,3}/`.

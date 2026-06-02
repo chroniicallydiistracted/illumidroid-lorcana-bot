@@ -43,18 +43,33 @@ Phase 13  baseline installed — 20 runtime probes total: 6 passing probes
           (2 Phase-1 + 3 Phase-2 + 1 Phase-3), 14 strict expected-red probes owned by later phases
 Phase 1   complete — audited GO
 Phase 2   complete — audited GO (structured sampler + raw rho / normalized weight)
-Phase 3   IN REMEDIATION — NO-GO. The full-`World` determinize_world bridge/server RPC is built
-          and the bounded re-review findings are fixed (cardIndex/cardMeta reconcile, owner/
-          controller preserve, summary invariance, seat==currentActor, exact-order agreement,
-          metadata allowlist, extended consistency oracle). REMAINING BLOCKERS: the
-          protected-facts ledger is only PARTIAL (reveal-window mechanism is guarded fail-closed;
-          static top-deck visibility, pending-effect card references, and opponent-perspective
-          §15 facts are NOT yet covered), and opponent hidden-instance-ID sanitization in
-          observations (F3) is unresolved (it conflicts with the search-only sampler design).
-Next      CLOSE the Phase 3 blockers (protected-facts ledger + F3) before Phase 7.
+Phase 3   NO-GO (awaiting re-audit). The full-`World` determinize_world bridge/server RPC is
+          built; the bounded re-review findings AND the NO-GO #3 closure contract (findings 1-8)
+          AND the third re-review's 7 blocking findings are now addressed + tested:
+          cardIndex/cardMeta reconcile, owner/controller preserve, summary invariance,
+          seat==currentActor, exact-order agreement, extended consistency oracle (controller +
+          structured revealedIds), and the observer-aware protected-facts LEDGER —
+          actor knowledge and engine references are now REPRESENTED + ENFORCED separately (the
+          4th re-review's "private engine refs are still exact-ID pins" finding):
+          (a) `actorVisiblePins` — exact-id positional, the ONLY identity constraint, sourced from
+          the visibility-correct fog projection + reveal `visibleTo` (scry/look knowledge INCLUDED;
+          opponent-PRIVATE reveals EXCLUDED; projection FAILS CLOSED); (b) engine refs are
+          SCHEMA-classified — a hidden card referenced only by a COUNT-ONLY metric
+          (`COUNT_ONLY_G_PATHS`, consumed via `.length`: cardsPutIntoInkwellThisTurn @
+          condition-evaluator.ts:482, inkedThisTurn @ turn-action-ink.ts:111) has its identity
+          IGNORED (no pin → posterior not conditioned on hidden truth), and an identity-bearing
+          PRIVATE ref to a hidden card QUARANTINES the state (unsupported; fail-closed without
+          biasing). The scan reads MAP KEYS + values. Plus: zone-specific obs redaction +
+          collision-free placeholders, reverse-index orphan validation, explicit metadata
+          semantics, cardIndex/cardMeta reconcile, owner/controller preserve, summary invariance,
+          seat==currentActor, exact-order agreement. `protected_facts` exposes the DISJOINT
+          `{pins, quarantineIds, countOnlyRefIds}`. 31 real-engine tests (2 narrow skips: opp-deck
+          positional + opponent-private reveal, both unreachable via automation; the self-deck
+          positional and count-only-leak equivalents run).
+Next      Phase 7 wiring STAYS BLOCKED until Phase 3 is audited GO.
 ```
 
-The latest verification is `153 passed / 14 xfailed`;
+The latest verification is `166 passed / 2 skipped / 14 xfailed` (182 collected);
 `compileall` and `git diff --check` are clean. Clean-label belief-guided training
 remains blocked until the final Tier A release gate.
 
@@ -578,31 +593,77 @@ The sampler’s math, docs, and stored fields agree. A test must fail if `rho` i
 
 ### Status
 
-**IN REMEDIATION — NO-GO (second re-review).** The full-`World` RPC is built and the bounded
-re-review findings are fixed + tested, but the deep information-set-consistency work is NOT
-complete, so Phase 3 is **not** GO. Second re-review (8 findings) outcome:
-- **FIXED + tested:** F2 metadata allowlist (no whole-object transfer between identities; only
-  the public inkwell ready/exerted scalar is preserved slot-wise); F4 owner/controller preserved
-  from the card's own cardIndex entry (per native `zone-operations.ts:212`); F5 public zone
-  summaries left byte-for-byte unchanged on a count-preserving repartition; F6 `selfId` must equal
-  `currentActor()`; F7 consistency oracle extended (badOwner / orphan reverse-index / summaries /
-  revealedIds; note `cardIndex.index` is optional in the engine so a positional check is reported
-  but not asserted); F8 docs + bridge docstring corrected.
-- **F1 PARTIAL (fail-closed):** a reveal-window protected-fact guard rejects any world that moves
-  a card currently known via `ctx.zones.reveals.active` (manual inking / scry / look) out of a
-  repartitioned zone — proven by a real-engine rejection+acceptance test against a freshly-inked
-  revealed opponent card. **STILL OPEN:** static top-deck visibility, pending-effect/continuation
-  card references, and opponent-perspective (§15) known facts are NOT covered.
-- **F3 UNRESOLVED:** opponent hidden instance IDs in `obs["hidden"]` are forwarded raw. This is
-  by-design for the search-only sampler (`World.opponent_hidden_pool` needs them; they never reach
-  the trunk/info_set_key), so "sanitizing" them conflicts with the current architecture and needs
-  the server-side sampler / opaque-ID design (spec §6.3/§16) — a real design item, not a quick fix.
+**NO-GO (awaiting re-audit).** The full-`World` RPC is built; the bounded re-review findings, the
+NO-GO #3 closure contract (findings 1-8), AND the third re-review's 7 blocking findings are all
+addressed + tested. Phase 3 stays NO-GO pending the user's re-audit; Phase 7 stays blocked.
 
-Verification: **153 passed / 14 xfailed**; `test_engine_determinize_world.py` 18 tests
-(honor + reject + state-consistency-through-play + ink-preservation + invalid-seat + wrong-actor +
-empty/whitespace-seed + failed-request-preservation + reversed-realized-order + reveal-guard
-reject/accept + reveal-surface). `compileall` + `git diff --check` clean. **Phase 3 stays NO-GO
-until the protected-facts ledger and F3 are closed; clean-label training remains blocked.**
+Earlier re-review findings (fixed + tested): F2 metadata allowlist (no whole-object transfer); F4
+owner/controller preserved from the card's own cardIndex entry (per native `zone-operations.ts:212`);
+F5 public zone summaries byte-for-byte unchanged; F6 `selfId == currentActor()`; F7 consistency
+oracle extended; F8 docs. (`cardIndex.index` is optional/not position-synced engine-wide — baseline
+~106 offsets — so `validateCloneConsistency` asserts zoneKey agreement + no-dup + owner/controller
++ reverse-index orphans, NOT a global positional index.)
+
+Third re-review (7 blocking findings) — the information-set logic, now CORRECT:
+- **#1 projection fail-OPEN → fail-CLOSED.** `collectProtectedFacts` no longer wraps `getBoard()`
+  in a catch-swallow; the actor fog projection is REQUIRED, and its absence throws (the whole
+  determinization fails closed) rather than proceeding without actor-visible pins.
+- **#2 private reveals were treated as actor knowledge → now `visibleTo`-correct.** The raw
+  `ctx.zones.reveals` scan (which pinned EVERY active reveal) is removed; actor knowledge comes
+  SOLELY from the visibility-correct fog projection (native `isCardVisibleViaReveal` filters
+  `visibleTo`). An opponent-PRIVATE reveal is no longer pinned, so it cannot bias the actor's
+  belief — proven by a real-engine test that finds such a state, asserts the card is absent from
+  the ledger, and confirms a world that REASSIGNS it is accepted.
+- **#3 live-reference scan missed map KEYS → now scans keys + values.** The recursive `G`/`cardMeta`
+  scan checks `idUniverse.has(k)` for every object key (the engine stores ids as keys in
+  `continuousEffects.byTarget`, `turnMetadata.cardsUnderThisTurn`, …), not only string values.
+- **#4 limbo placeholder collisions → per-zone running counter.** Redaction no longer trusts the
+  projection's `zoneIndex` (native assigns slot 0 to every hidden limbo card); each redacted
+  opponent hidden card gets a distinct `oppslot:<zone>:<seq>` slot. Tested: all obs ids are unique.
+- **#5 redaction was not zone-specific → now zone-specific.** Only the opponent INKWELL forwards
+  exertion (public spent ink); hidden hand/deck/limbo rows are physically neutral
+  (exerted=false / ready=true / damage=0 / drying=false). Tested.
+- **#6 staged validation missed reverse-index orphans → added.** `validateCloneConsistency` now
+  rejects any `cardIndex` entry whose lane does not contain it, BEFORE `loadState`.
+- **#7 metadata normalization under-proven → explicit semantics.** A card MOVED into a hidden zone
+  is REJECTED for an unknown meta key, non-zero `damage`, `isDrying`, or face-up state, and has its
+  stale `revealed` flag explicitly CLEARED (a reassigned card is freshly hidden — clearing, not
+  rejecting, so an opponent-private-revealed card stays belief-free per #2).
+
+Fourth re-review — "private engine references are still exact-ID pins" (RESOLVED). The previous
+pass unioned `engineRef` and `actorVisible` into ONE positional pin map, so a private engine
+reference (reachable: a top-deck-to-inkwell effect stores a hidden id in
+`turnMetadata.cardsPutIntoInkwellThisTurn` / `inkedThisTurn` — verified leak state s2/step-10,
+opp-hidden `t000013`) PINNED the hidden identity and conditioned the actor's posterior on hidden
+truth. Now actor knowledge and engine references are REPRESENTED and ENFORCED separately:
+- `actorVisiblePins` — the ONLY exact-id positional constraint — sourced from the visibility-correct
+  fog projection PLUS reveal windows filtered by the native `isCardVisibleViaReveal` `visibleTo`
+  rule (`"all"` or naming the actor). This captures the actor's OWN scry/look knowledge over
+  mid-deck cards the board projection does not surface (else the actor's own scry decisions would
+  wrongly quarantine), while still EXCLUDING opponent-private reveals (Finding #2 preserved).
+- engine references are SCHEMA-classified by their `G` path: a `COUNT_ONLY_G_PATHS` metric
+  (consumed via `.length` — cardsPutIntoInkwellThisTurn @ condition-evaluator.ts:482, inkedThisTurn
+  @ turn-action-ink.ts:111 / derived-state.ts:560) has its IDENTITY ignored (no pin → no posterior
+  leak); any other (identity-bearing) private reference to a hidden card the actor cannot see
+  QUARANTINES the determinization as an unsupported state (fail-closed, without biasing toward a
+  world — neither pinned nor silently moved). Unknown paths default to identity-bearing (fail-closed).
+`protected_facts` now exposes the three DISJOINT classes `{pins (actor-visible), quarantineIds
+(identity-bearing private), countOnlyRefIds (count-only, deliberately free)}`. Measured: 0
+quarantines across 1363 real actor-decision states (no over-quarantine); the count-only leak state
+is reachable and the freed card is provably reassignable.
+
+Verification: **166 passed / 2 skipped / 14 xfailed** (182 collected); `test_engine_determinize_world.py`
+33 tests / 31 passing. `compileall` + `git diff --check` clean. Clean-label training stays blocked
+by `tier_a_guard` (a separate release gate).
+
+Honest residual (narrow, disclosed): two tests skip on unreachable preconditions — the opponent-deck
+positional-protection test (needs a card revealing the OPPONENT's deck top; the SELF-deck positional
+test exercises the identical pin/`seededShufflePinned` path) and the opponent-private-reveal test
+(genuinely opponent-private reveals — `visibleTo` excluding the actor — do not arise in automated
+play; the `visibleTo` filter is covered by a source guard + the scry positive test). The
+malformed-`cardIndex`, face-up-inkwell, and identity-bearing-quarantine rejection branches are
+defense-in-depth safeties that well-formed automated play never emits, so they run on the positive
+path but have no isolated negative trigger via the bot bridge.
 
 The full-`World` determinization RPC was added (bot-owned bridge/server only; no
 `lorcana-simulator/packages/**` change):
@@ -616,18 +677,16 @@ The full-`World` determinization RPC was added (bot-owned bridge/server only; no
   (a missing/empty seed in that case is rejected); returns the REALIZED post-load partition.
 - `engine/bridge.py` `determinize_world(self_id, world)`: serializes the `World`, raises
   `BridgeError` on any server rejection, and asserts the realized partition matches the
-  request per zone (multiset, defense in depth); stashes `last_world_realized`.
+  request per zone EXACTLY (ORDER-SENSITIVE, defense in depth); stashes `last_world_realized`.
+  `protected_facts()` exposes the ledger (`{self, pins:{zone:[{index,id}]}, pinnedIds}`).
 
-Proof: `tests/test_engine_determinize_world.py` (10 real-engine tests, incl. the completion
-criterion — two different requested inkwell assignments produce two different ACTUAL inkwell
-assignments; exact self-deck order honored; duplicate/missing-pool/malformed/duplicate-self/
-conservation rejections; same-seed reproducibility; a static guard that `determinizeWorld`
-contains no `Math.random`). The Phase-3-owned probe
-`test_bridge_exposes_full_world_determinize_rpc` is converted to passing. Full suite
-**145 passed / 14 xfailed** (no XPASS; the 14 remaining probes still fail at their owned
-assertions); `compileall` + `git diff --check` clean.
+Proof: `tests/test_engine_determinize_world.py` (now 30 real-engine tests / 29 passing — see the
+Status block above for the authoritative current list; the original build shipped 10). The
+Phase-3-owned probe `test_bridge_exposes_full_world_determinize_rpc` is converted to passing.
+Full suite currently **166 passed / 2 skipped / 14 xfailed** (no XPASS; the 14 remaining probes
+still fail at their owned assertions); `compileall` + `git diff --check` clean.
 
-Re-review NO-GO (findings 1–5) remediated:
+Re-review NO-GO (findings 1–5) remediated (chronological record; superseded by the Status block):
 - **F1 (zone-state corruption):** raw `zoneCards` surgery left the engine's parallel
   `cardIndex` (location) and `cardMeta` (inkwell ready/face state) stale, so `moveCard()`
   resolved cards in the wrong zone and duplicated instances on the next play. `determinizeWorld`

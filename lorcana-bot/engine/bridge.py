@@ -191,10 +191,13 @@ class LorcanaEngine:
 
     def protected_facts(self) -> dict:
         """Phase 3 observer-aware protected-facts ledger for the CURRENT actor:
-        `{self, pins: {zoneKey: [{index, id}]}, pinnedIds: [...]}`. A position is pinned when its
-        current card is actor-known (reveal / scry / static top-deck) or live-referenced anywhere
-        in the runtime state — `determinize_world` rejects any world that moves/reorders a pinned
-        card (Findings #1, #2). Lets a caller construct ledger-respecting worlds."""
+        `{self, pins: {zoneKey: [{index, id}]}, pinnedIds, quarantineIds, countOnlyRefIds}`.
+        `pins`/`pinnedIds` = ACTOR-VISIBLE positional facts (reveal `visibleTo` / scry / static
+        top-deck) — the ONLY identity the determinization constrains. `quarantineIds` = hidden
+        cards carrying an identity-bearing PRIVATE engine reference (the state is unsupported and
+        `determinize_world` rejects it fail-closed). `countOnlyRefIds` = hidden cards referenced
+        only by count-only metrics — deliberately NOT pinned (their identity is irrelevant; pinning
+        would condition the posterior on hidden truth). The three sets are DISJOINT."""
         return self._rpc({"op": "protected_facts"})["protectedFacts"]
 
     def step_exact(self, stable_key: str) -> dict:

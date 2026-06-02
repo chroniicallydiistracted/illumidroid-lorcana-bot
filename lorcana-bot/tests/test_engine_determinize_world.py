@@ -2,9 +2,11 @@
 
 Proves `determinize_world`:
   * HONORS the exact opponent hand/inkwell/deck partition + optional self-deck order;
-  * is observer-aware — it preserves every PROTECTED FACT (a card actor-known via reveal / scry /
-    static top-deck, OR live-referenced anywhere in the runtime state), positionally for decks,
-    across ALL four repartitioned zones (opponent hand/inkwell/deck + self deck);
+  * is observer-aware — it pins ONLY ACTOR-VISIBLE facts (cards the actor sees via the fog
+    projection + reveal `visibleTo` / scry / static top-deck), positionally for decks, across all
+    four repartitioned zones; a PRIVATE engine reference to a hidden card does NOT pin its identity
+    (count-only metrics are ignored; identity-bearing private refs quarantine the state) — so the
+    belief is never conditioned on hidden truth;
   * never leaks an OPPONENT hidden-zone identity into the actor-visible `obs["cards"]`
     (Finding #3) while keeping the privileged `obs["hidden"]` witness for the sampler;
   * FAILS CLOSED (raises, live state untouched) on malformed / duplicate / non-conserving /
@@ -46,6 +48,41 @@ def midgame():
 
 
 @pytest.fixture
+def self_deck_pin_state():
+    """A real state where the CURRENT actor has a PROTECTED self-deck position — a top-of-deck
+    card whose identity (and position) the actor legally knows. Used to prove the self deck is no
+    longer ignored: the seeded shuffle keeps the known card in place, and a world that displaces
+    it is rejected."""
+    e = None
+    found = None
+    for seed in ("s7", "p3-reveal", "s1", "s3", "s5", "deck-scry"):
+        e = LorcanaEngine()
+        obs = e.reset(seed)
+        for _ in range(60):
+            if obs["done"]:
+                break
+            pf = e.protected_facts()
+            sid = pf["self"]
+            if sid:
+                spins = pf["pins"].get(f"deck:{sid}", [])
+                if spins and obs["players"]["self"]["deckCount"] >= 3:
+                    found = (obs, spins)
+                    break
+            obs = e.step_auto("best")["obs"]
+        if found:
+            break
+        e.close()
+        e = None
+    try:
+        if not found:
+            pytest.skip("no protected self-deck position reached across the searched seeds")
+        yield e, found[0], found[1]
+    finally:
+        if e is not None:
+            e.close()
+
+
+@pytest.fixture
 def pinned_state():
     """A real state where a PROTECTED FACT lands inside the current actor's repartitioned pool —
     a card the determinization must not move (reveal window / live reference). Reliably produced
@@ -65,6 +102,78 @@ def pinned_state():
         obs = e.step_auto("best")["obs"]
     yield e, found
     e.close()
+
+
+@pytest.fixture
+def opp_private_reveal_state():
+    """A real state where a card in the current actor's OPPONENT repartitioned pool is in an
+    active reveal window that is NOT visible to the actor (an opponent-private reveal). The actor
+    must NOT treat it as known (Finding #2) — it is excluded from the protected-facts ledger and
+    the belief stays free to vary it."""
+    e = None
+    found = None
+    for seed in ("s0", "s1", "s2", "s3", "s4", "p3-reveal"):
+        e = LorcanaEngine()
+        obs = e.reset(seed)
+        for _ in range(60):
+            if obs["done"]:
+                break
+            revealed = {r["id"] for r in e.check_consistency()["revealedIds"]}
+            if revealed:
+                pinned = set(e.protected_facts()["pinnedIds"])
+                hand, ink, deck = _opp_pool(obs)
+                pool = set(hand + ink + deck)
+                private = (revealed & pool) - pinned     # revealed, in opp pool, but not actor-known
+                if private and len(deck) >= 1 and len(ink) >= 1:
+                    found = (obs, private)
+                    break
+            obs = e.step_auto("best")["obs"]
+        if found:
+            break
+        e.close()
+        e = None
+    try:
+        if not found:
+            pytest.skip("no opponent-private reveal in the actor pool across the searched seeds")
+        yield e, found[0], found[1]
+    finally:
+        if e is not None:
+            e.close()
+
+
+@pytest.fixture
+def count_only_ref_state():
+    """A real state where an OPPONENT-HIDDEN card is referenced by a COUNT-ONLY engine metric
+    (e.g. a top-deck-to-inkwell effect storing its private id in `turnMetadata.inkedThisTurn` /
+    `cardsPutIntoInkwellThisTurn`, consumed only as a count). The actor cannot see the card, so the
+    ledger must NOT pin it — the belief stays free to reassign it (the prior merged-pin code pinned
+    it, conditioning the posterior on hidden truth)."""
+    e = None
+    found = None
+    for seed in ("s2", "s0", "s4", "s6", "s9", "topdeck"):
+        e = LorcanaEngine()
+        obs = e.reset(seed)
+        for _ in range(50):
+            if obs["done"]:
+                break
+            pf = e.protected_facts()
+            opp_hidden = {c["id"] for z in ("hand", "inkwell", "deck") for c in obs["hidden"][z]}
+            co = [i for i in pf.get("countOnlyRefIds", []) if i in opp_hidden]
+            if co:
+                found = (obs, co)
+                break
+            obs = e.step_auto("best")["obs"]
+        if found:
+            break
+        e.close()
+        e = None
+    try:
+        if not found:
+            pytest.skip("no opponent-hidden count-only engine reference reached across the searched seeds")
+        yield e, found[0], found[1]
+    finally:
+        if e is not None:
+            e.close()
 
 
 # --- helpers -----------------------------------------------------------------
@@ -221,7 +330,7 @@ def test_determinize_world_rejects_moving_a_protected_card(pinned_state):
         else:  # in hand
             w = _world(_swap_in_place(hand, target, deck[0]), ink,
                        _swap_in_place(deck, deck[0], target), seed="rv")
-        with pytest.raises(BridgeError, match="protected fact"):
+        with pytest.raises(BridgeError, match="actor-visible fact"):
             eng.determinize_world(self_id, w)
         # keeping every protected card in place is NOT rejected for this reason
         eng.determinize_world(self_id, _world(hand, ink, deck, seed="keep"))
@@ -252,7 +361,7 @@ def test_determinize_world_failed_protected_violation_preserves_state(pinned_sta
         else:
             w = _world(_swap_in_place(hand, target, deck[0]), ink,
                        _swap_in_place(deck, deck[0], target), seed="rv")
-        with pytest.raises(BridgeError, match="protected fact"):
+        with pytest.raises(BridgeError, match="actor-visible fact"):
             eng.determinize_world(self_id, w)
         after = eng.observe()
         assert [a["stableKey"] for a in after["legal"]] == [a["stableKey"] for a in before["legal"]]
@@ -289,8 +398,60 @@ def test_determinize_world_preserves_protected_deck_position(pinned_state):
     reordered[pin["index"]], reordered[j] = reordered[j], reordered[pin["index"]]
     root = eng.snapshot()
     try:
-        with pytest.raises(BridgeError, match="protected fact"):
+        with pytest.raises(BridgeError, match="actor-visible fact"):
             eng.determinize_world(self_id, _world(hand, ink, reordered, seed="reorder"))
+    finally:
+        eng.restore(root)
+        eng.drop_snapshot(root)
+
+
+def test_seeded_self_deck_shuffle_preserves_protected_position(self_deck_pin_state):
+    """Finding #1 (self deck no longer ignored): when the world omits the self-deck order the
+    server shuffles it DETERMINISTICALLY, but PINS every protected (actor-known) self-deck
+    position in place — the known top-deck card stays at its index while the free remainder is
+    permuted."""
+    eng, obs, spins = self_deck_pin_state
+    hand, ink, deck = _opp_pool(obs)          # opponent pool passed as identity; focus is self deck
+    self_id = obs["self"]
+    root = eng.snapshot()
+    try:
+        eng.determinize_world(self_id, _world(hand, ink, deck, self_deck=None, seed="pinA"))
+        realized = list(eng.last_world_realized["selfDeckIds"])
+        for p in spins:
+            assert realized[p["index"]] == p["id"], "seeded shuffle moved a protected self-deck card"
+        # the FREE remainder is actually shuffled (different seed -> different free order), proving
+        # the pin is a targeted constraint, not a no-op identity shuffle.
+        pinned_idx = {p["index"] for p in spins}
+        free_now = [c for i, c in enumerate(realized) if i not in pinned_idx]
+        if len(free_now) >= 2:
+            eng.restore(root)
+            eng.determinize_world(self_id, _world(hand, ink, deck, self_deck=None, seed="pinB"))
+            r2 = list(eng.last_world_realized["selfDeckIds"])
+            for p in spins:
+                assert r2[p["index"]] == p["id"]            # still pinned under a different seed
+            assert r2 != realized                            # free remainder genuinely permuted
+    finally:
+        eng.restore(root)
+        eng.drop_snapshot(root)
+
+
+def test_determinize_world_rejects_displacing_protected_self_deck_position(self_deck_pin_state):
+    """Finding #1 (rejection): a SUPPLIED self-deck order that moves a protected self-deck card off
+    its known index is rejected fail-closed."""
+    eng, obs, spins = self_deck_pin_state
+    hand, ink, deck = _opp_pool(obs)          # opponent pool passed as identity; focus is self deck
+    self_id = obs["self"]
+    root = eng.snapshot()
+    try:
+        eng.determinize_world(self_id, _world(hand, ink, deck, self_deck=None, seed="base"))
+        s = list(eng.last_world_realized["selfDeckIds"])
+        eng.restore(root)
+        pin = spins[0]
+        other = next(i for i in range(len(s)) if i != pin["index"])
+        displaced = list(s)
+        displaced[pin["index"]], displaced[other] = displaced[other], displaced[pin["index"]]
+        with pytest.raises(BridgeError, match="actor-visible fact"):
+            eng.determinize_world(self_id, _world(hand, ink, deck, self_deck=displaced, seed="bad"))
     finally:
         eng.restore(root)
         eng.drop_snapshot(root)
@@ -332,6 +493,162 @@ def test_hidden_swap_is_observationally_invariant_to_actor(midgame):
         after = eng.observe()
         assert after["cards"] == before["cards"], "actor-visible cards changed under a hidden swap (leak)"
         assert after["hidden"] != before["hidden"], "the privileged sampler witness did not change"
+    finally:
+        eng.restore(root)
+        eng.drop_snapshot(root)
+
+
+def test_obs_card_ids_are_unique(midgame):
+    """Finding #4: every redacted opponent hidden card gets a DISTINCT slot placeholder (native
+    projection assigns slot 0 to all hidden limbo cards, which under a `zoneIndex`-based scheme
+    would collide and overwrite token positions). No two obs["cards"] rows share an id."""
+    eng, obs = midgame
+    _ready(obs)
+    ids = [c["id"] for c in obs["cards"]]
+    assert len(ids) == len(set(ids)), "duplicate obs['cards'] id (placeholder collision risk)"
+
+
+def test_opponent_hidden_redaction_is_zone_specific(midgame):
+    """Finding #5: redaction forwards only fields PROVEN public for that hidden zone. Opponent
+    hidden HAND/DECK rows expose no per-card physical state (neutral exerted/ready/damage); only
+    the inkwell may forward exertion (public spent ink)."""
+    eng, obs = midgame
+    _ready(obs)
+    saw_nonink = False
+    for c in obs["cards"]:
+        if c["owner"] == 1 and c["hidden"] and c["zone"] in ("hand", "deck", "limbo"):
+            saw_nonink = True
+            assert c["exerted"] is False and c["ready"] is True and c["damage"] == 0 \
+                and c["drying"] is False, f"non-inkwell hidden row leaked physical state: {c}"
+    if not saw_nonink:
+        pytest.skip("no opponent hidden hand/deck/limbo rows at this state")
+
+
+def test_opponent_private_reveal_is_not_actor_knowledge(opp_private_reveal_state):
+    """Finding #2: a reveal window NOT visible to the actor (opponent-private) must NOT pin the
+    card — the actor does not legally know it, so the belief stays free to reassign it. The card
+    is absent from the ledger and a world that MOVES it is accepted (the prior blind reveal scan,
+    which pinned every active reveal regardless of `visibleTo`, would have rejected the move)."""
+    eng, obs, private = opp_private_reveal_state
+    hand, ink, deck = _ready(obs)
+    self_id = obs["self"]
+    target = next(iter(private))
+    assert target not in set(eng.protected_facts()["pinnedIds"])      # not treated as actor knowledge
+    root = eng.snapshot()
+    try:
+        if target in ink:
+            w = _world(hand, _swap_in_place(ink, target, deck[0]),
+                       _swap_in_place(deck, deck[0], target), seed="mv")
+        elif target in deck:
+            w = _world(hand, _swap_in_place(ink, ink[0], target),
+                       _swap_in_place(deck, target, ink[0]), seed="mv")
+        else:
+            w = _world(_swap_in_place(hand, target, deck[0]), ink,
+                       _swap_in_place(deck, deck[0], target), seed="mv")
+        eng.determinize_world(self_id, w)                            # accepted: belief may vary it
+        moved = (list(eng.last_world_realized["opponentInkwellIds"])
+                 + list(eng.last_world_realized["opponentDeckIds"])
+                 + list(eng.last_world_realized["opponentHandIds"]))
+        assert target in moved                                       # still conserved, just reassigned
+    finally:
+        eng.restore(root)
+        eng.drop_snapshot(root)
+
+
+# --- regression guards: the production information-set logic is correct -------
+def _ledger_src():
+    src = _SERVER_TS.read_text()
+    start = src.index("private collectProtectedFacts(")
+    end = src.index("protectedFacts(): {", start)
+    return src[start:end]
+
+
+def test_protected_facts_projection_fails_closed_not_open():
+    """Finding #1: the actor-visible projection is REQUIRED — `collectProtectedFacts` must NOT
+    swallow a projection failure and proceed without actor pins. The body throws on a missing
+    projection and contains no bare catch-swallow."""
+    body = _ledger_src()
+    assert "catch {" not in body and "catch (" not in body, "projection failure is swallowed (fail-open)"
+    assert "projection unavailable" in body and "throw new Error" in body, "no fail-closed projection guard"
+
+
+def test_protected_facts_reveal_scan_is_visibleto_filtered():
+    """Finding #2: any reveal-window read for actor knowledge must apply the native
+    `isCardVisibleViaReveal` `visibleTo` rule (`"all"` or a window naming the actor), so an
+    opponent-PRIVATE reveal is never treated as actor knowledge."""
+    body = _ledger_src()
+    assert "zones.reveals" in body, "reveal-window actor knowledge not consulted at all"
+    assert 'vt === "all"' in body and "vt.includes(selfId)" in body, "reveal scan ignores visibleTo"
+
+
+def test_protected_facts_scans_card_ids_stored_as_map_keys():
+    """Finding #3: the live-reference scan must inspect MAP KEYS (engine stores card ids as keys,
+    e.g. continuousEffects.byTarget, turnMetadata.cardsUnderThisTurn), not only values."""
+    body = _ledger_src()
+    assert "idUniverse.has(k)" in body and "classify(k" in body, "scan does not check map keys"
+
+
+# --- engine refs SEPARATE from actor-visible pins (count-only ignored) --------
+def test_count_only_private_reference_does_not_pin_hidden_identity(count_only_ref_state):
+    """The cited leak: a private engine reference to a HIDDEN card in a COUNT-ONLY metric must NOT
+    pin its exact identity (that conditions the actor's posterior on hidden truth). The card is
+    absent from `pins`, present in `countOnlyRefIds`, and a world that REASSIGNS it is accepted —
+    the prior code unioned engine refs into the pin map and would have rejected the move."""
+    eng, obs, co = count_only_ref_state
+    hand, ink, deck = _ready(obs)
+    self_id = obs["self"]
+    pf = eng.protected_facts()
+    target = co[0]
+    assert target not in set(pf["pinnedIds"]), "count-only-referenced hidden card was pinned (leak)"
+    assert target in set(pf["countOnlyRefIds"])
+    root = eng.snapshot()
+    try:
+        if target in ink:
+            w = _world(hand, _swap_in_place(ink, target, deck[0]),
+                       _swap_in_place(deck, deck[0], target), seed="co")
+        elif target in deck:
+            w = _world(hand, _swap_in_place(ink, ink[0], target),
+                       _swap_in_place(deck, target, ink[0]), seed="co")
+        else:
+            w = _world(_swap_in_place(hand, target, deck[0]), ink,
+                       _swap_in_place(deck, deck[0], target), seed="co")
+        eng.determinize_world(self_id, w)                       # accepted: belief free to reassign it
+        moved = (list(eng.last_world_realized["opponentInkwellIds"])
+                 + list(eng.last_world_realized["opponentDeckIds"])
+                 + list(eng.last_world_realized["opponentHandIds"]))
+        assert target in moved
+    finally:
+        eng.restore(root)
+        eng.drop_snapshot(root)
+
+
+def test_protected_facts_sets_are_disjoint(midgame):
+    """The three ledger classes are represented SEPARATELY and never overlap: an id is at most one
+    of actor-visible (`pinnedIds`), identity-bearing-private (`quarantineIds`), or count-only
+    (`countOnlyRefIds`)."""
+    eng, obs = midgame
+    _ready(obs)
+    pf = eng.protected_facts()
+    pins = set(pf["pinnedIds"]); quar = set(pf["quarantineIds"]); co = set(pf["countOnlyRefIds"])
+    assert pins.isdisjoint(quar) and pins.isdisjoint(co) and quar.isdisjoint(co)
+
+
+def test_scry_revealed_self_deck_card_is_actor_visible_not_quarantined(self_deck_pin_state):
+    """The actor's OWN scry (a reveal `visibleTo` the actor over mid-deck cards the board
+    projection does not surface) is ACTOR knowledge: such cards are pinned (exact id) and the
+    determinization proceeds — NOT quarantined. Guards against the projection-only ledger wrongly
+    quarantining the actor's own scry decisions."""
+    eng, obs, spins = self_deck_pin_state
+    hand, ink, deck = _opp_pool(obs)
+    self_id = obs["self"]
+    pf = eng.protected_facts()
+    assert not pf["quarantineIds"], f"actor's own knowledge wrongly quarantined: {pf['quarantineIds']}"
+    assert spins[0]["id"] in set(pf["pinnedIds"])               # the known self-deck card is pinned
+    root = eng.snapshot()
+    try:
+        eng.determinize_world(self_id, _world(hand, ink, deck, self_deck=None, seed="scry"))
+        realized = list(eng.last_world_realized["selfDeckIds"])
+        assert realized[spins[0]["index"]] == spins[0]["id"]   # pinned position preserved
     finally:
         eng.restore(root)
         eng.drop_snapshot(root)

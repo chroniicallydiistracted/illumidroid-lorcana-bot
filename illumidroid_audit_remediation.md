@@ -130,9 +130,9 @@ The root-invariance test samples only hand + deck in [test_search_belief.py](/ho
 The exact conditional-Bernoulli sampler works in its tested path. Per-seat trackers are instantiated correctly. The shared `InfoSetTable`, action-ID alignment, invalid-path quarantine, and synthetic strategy-fusion fixture are real improvements.
 
 **Verification**
-Latest Phase-2 GO verification:
+Latest verification (Phase-3 NO-GO #3 closure findings addressed + tested; awaiting re-audit):
 ```text
-../lorcana-bot-venv/bin/python -m pytest -q   # 134 passed / 15 xfailed (149 collected)
+../lorcana-bot-venv/bin/python -m pytest -q   # 166 passed / 2 skipped / 14 xfailed (182 collected)
 git diff --check
 python -m compileall -q engine network search training tests
 ```

@@ -353,6 +353,24 @@ const HIDDEN_ZONE_META_ALLOW = new Set<string>([
   "state", "damage", "isDrying", "publicFaceState", "revealed",
 ]);
 
+// SCHEMA for the protected-facts ledger: runtime-state `G` paths that store card ids as
+// COUNT-ONLY metrics — `turnMetadata` "<verb>ThisTurn" arrays consumed solely via `.length`
+// (e.g. cardsPutIntoInkwellThisTurn @ condition-evaluator.ts:482, inkedThisTurn @
+// turn-action-ink.ts:111 / derived-state.ts:560). For these the stored IDENTITY is irrelevant —
+// the id still exists after a determinization permutes the hidden pool, so the count is invariant
+// — so a hidden id appearing here is NOT a fact the actor knows and must NOT pin (it would
+// condition the posterior on hidden truth). Any G path NOT in this set defaults to
+// identity-bearing (fail-closed: an unrecognised private reference quarantines the state).
+const COUNT_ONLY_G_PATHS = new Set<string>([
+  "G.turnMetadata.cardsPlayedThisTurn",
+  "G.turnMetadata.charactersQuesting",
+  "G.turnMetadata.inkedThisTurn",
+  "G.turnMetadata.cardsPutIntoInkwellThisTurn",
+  "G.turnMetadata.shiftPlayedThisTurn",
+  "G.turnMetadata.challengedCharactersThisTurn",
+  "G.turnMetadata.banishedCharactersThisTurn",
+]);
+
 class Session {
   engine: AnyEngine;
   seed: string;
@@ -477,91 +495,149 @@ class Session {
     return out;
   }
 
-  /** Observer-aware PROTECTED-FACTS LEDGER (Findings #1, #2). For the FOUR repartitioned zones
-   *  (opponent hand/inkwell/deck + self deck) it computes the positions whose current card the
-   *  determinization MUST preserve EXACTLY (same id at the same index), because moving/reordering
-   *  it would either rewrite a fact the acting player legally knows or corrupt a live engine
-   *  reference. A position is pinned when its current card is:
-   *    (a) ACTOR-KNOWN — the card is non-hidden in the actor's own fog projection
-   *        (`getBoard(view)`), the engine's source of truth for reveal windows, scry, and
-   *        static top-deck visibility (`isCardVisibleViaReveal` / `isTopDeckCardVisibleViaStaticEffect`).
-   *        For the deck this preserves POSITIONAL knowledge (top/bottom), closing the "revealed
-   *        deck card slides from top to bottom while staying in the deck" gap.
-   *    (b) LIVE-REFERENCED — the card id appears anywhere in the live runtime game state `G`
-   *        (turn metadata, triggered-ability pending events / registrations / bag, replacement
-   *        registrations, continuous effects, pending action effects + continuations,
-   *        play-from-under permissions) OR as a cross-reference inside another card's `cardMeta`
-   *        (cardsUnder / stackParentId / atLocationId). Any such reference, classified or not, is
-   *        treated as a fact: the card is pinned. The sampler is not yet ledger-aware, so a world
-   *        that violates a pin is rejected fail-closed (the correct Phase-3 behavior). */
-  private collectProtectedFacts(clone: any, selfId: string, zoneKeys: string[]):
-      Record<string, Map<number, string>> {
+  /** Observer-aware PROTECTED-FACTS LEDGER. Actor knowledge and engine references are computed
+   *  and represented SEPARATELY (no longer unioned into one pin map), because they mean different
+   *  things and must be ENFORCED differently:
+   *
+   *    (a) `actorVisiblePins` — EXACT-ID POSITIONAL pins, the ONLY identity the determinization is
+   *        constrained to reproduce. Sourced SOLELY from the actor's own fog projection
+   *        (`getBoard(view)`), the engine's visibility-correct source of truth (native
+   *        `projectPlayerBoard` applies fog + reveal `visibleTo` via `isCardVisibleViaReveal` +
+   *        static top-deck via `isTopDeckCardVisibleViaStaticEffect`). We do NOT raw-scan
+   *        `ctx.zones.reveals` (that would pin opponent-PRIVATE reveals — Finding #2). The
+   *        projection is REQUIRED: its absence FAILS CLOSED (Finding #1). For decks this preserves
+   *        positional (top/bottom/scry) knowledge.
+   *
+   *    (b) `quarantineIds` — engine references to a repartitioned HIDDEN card the actor CANNOT see.
+   *        Such a reference must NOT pin the hidden identity (that conditions the posterior on
+   *        hidden truth). It is SCHEMA-CLASSIFIED by its `G` path: a COUNT-ONLY metric
+   *        (`COUNT_ONLY_G_PATHS`, consumed via `.length`) is permutation-invariant and IGNORED;
+   *        any other (identity-bearing) private reference cannot be safely pinned OR remapped, so
+   *        the determinization is QUARANTINED as an unsupported state (fail closed, without biasing
+   *        toward a world). The scan inspects VALUES and MAP KEYS (Finding #3). References to
+   *        actor-visible or non-repartitioned cards are no-ops (the card does not move / is known).
+   *
+   *  This realises the audit's required split: exact-IDs only for actor-visible facts; identity
+   *  ignored for count-only metrics; unsupported identity-bearing private references quarantined. */
+  private collectProtectedFacts(clone: any, selfId: string, zoneKeys: string[]): {
+    actorVisiblePins: Record<string, Map<number, string>>;
+    quarantineIds: Set<string>;
+    countOnlyRefIds: Set<string>;
+  } {
     const idUniverse = new Set<string>(Object.keys(clone.ctx.zones.private.cardIndex ?? {}));
     const zc = clone.ctx.zones.private.zoneCards;
     const meta = clone.ctx.zones.private.cardMeta ?? {};
 
-    // (b) live references: recursive scan of G (NOT the zone card lists, which live under ctx)
-    // plus cross-references inside cardMeta VALUES (never the owning key).
-    const liveRef = new Set<string>();
-    const scan = (v: any) => {
-      if (v == null) return;
-      if (typeof v === "string") { if (idUniverse.has(v)) liveRef.add(v); return; }
-      if (Array.isArray(v)) { for (const x of v) scan(x); return; }
-      if (typeof v === "object") { for (const k of Object.keys(v)) scan(v[k]); }
-    };
-    scan(clone.G);
-    for (const m of Object.values(meta) as any[]) {
-      for (const k of Object.keys(m ?? {})) scan(m[k]);   // values only — keys are owners, not refs
+    // The set of ids the determinization may PERMUTE (the four repartitioned hidden zones). A
+    // reference to a card OUTSIDE these zones (in play / discard) is irrelevant — that card never
+    // moves, so its references stay valid regardless.
+    const repartitioned = new Set<string>();
+    for (const zk of zoneKeys) for (const id of (zc[zk] ?? [])) repartitioned.add(id);
+
+    // (a) ACTOR-VISIBLE identities — the ONLY exact-id positional pins. Cards non-hidden in the
+    // actor's own fog projection (the engine's visibility-correct source of truth: reveal
+    // `visibleTo`, scry, static top-deck). REQUIRED — a projection failure FAILS CLOSED
+    // (Finding #1); we never proceed without actor pins.
+    const actorVisible = new Set<string>();
+    const board: any = this.engine.getBoard(viewFor(selfId));
+    if (!board || typeof board !== "object" || !board.cards) {
+      throw new Error("determinize_world: actor fog projection unavailable (cannot compute actor-visible pins)");
     }
-
-    // (a) actor-known identities: cards non-hidden in the actor's fog projection.
-    const known = new Set<string>();
-    try {
-      const board: any = this.engine.getBoard(viewFor(selfId));
-      for (const c of Object.values(board.cards ?? {}) as any[]) {
-        if (c && c.hidden === false && typeof c.id === "string" && idUniverse.has(c.id)) known.add(c.id);
-      }
-    } catch { /* projection unavailable — fall back to live-ref + reveal-window pins only */ }
-
-    // (a, defense in depth) raw reveal-window membership, independent of the projection.
+    for (const c of Object.values(board.cards) as any[]) {
+      if (c && c.hidden === false && typeof c.id === "string" && idUniverse.has(c.id)) actorVisible.add(c.id);
+    }
+    // The board projection only surfaces top/bottom-of-deck cards individually, so a reveal the
+    // actor is CURRENTLY resolving over mid-deck cards (e.g. a scry the actor is choosing from) is
+    // genuine actor knowledge that `board.cards` does not expose. Add reveal-window cards using
+    // the EXACT native `isCardVisibleViaReveal` `visibleTo` rule — `"all"` or a window naming the
+    // actor — so scry/look knowledge is captured WHILE opponent-PRIVATE reveals stay excluded
+    // (Finding #2). This is visibility-CORRECT, unlike the removed blind scan.
     for (const rv of (clone.ctx.zones.reveals?.active ?? [])) {
-      for (const cid of (rv.cardIDs ?? [])) if (idUniverse.has(cid)) known.add(cid);
+      const vt = rv?.visibleTo;
+      const visibleToActor = vt === "all" || (Array.isArray(vt) && vt.includes(selfId));
+      if (!visibleToActor) continue;
+      for (const cid of (rv.cardIDs ?? [])) if (idUniverse.has(cid)) actorVisible.add(cid);
     }
 
-    const pins: Record<string, Map<number, string>> = {};
+    // (b) ENGINE references, SCHEMA-CLASSIFIED and kept DISTINCT from actor knowledge. A live
+    // reference to a repartitioned HIDDEN card (one the actor cannot see) must NOT pin its exact
+    // identity — that would condition the actor's posterior on hidden truth. The reference is
+    // classified by WHERE it lives:
+    //   * COUNT-ONLY metric path (turn-metadata "<verb>ThisTurn" arrays, consumed only via
+    //     `.length` — verified for cardsPutIntoInkwellThisTurn @ condition-evaluator.ts:482 and
+    //     inkedThisTurn @ turn-action-ink.ts:111 / derived-state.ts:560): identity is irrelevant
+    //     (the id still exists after the permutation, so the count is invariant) -> IGNORE.
+    //   * actor-visible: handled by (a) -> IGNORE here (the card does not move, ref stays valid).
+    //   * anything else (identity-bearing private reference): we can neither pin (leak) nor safely
+    //     remap it -> QUARANTINE the whole determinization as an UNSUPPORTED state (fail closed,
+    //     without biasing toward any particular world). Unknown paths default to identity-bearing.
+    const quarantineIds = new Set<string>();
+    const countOnlyRefIds = new Set<string>();   // hidden + count-only-referenced -> deliberately NOT pinned
+    const classify = (id: string, countOnly: boolean) => {
+      if (!repartitioned.has(id)) return;     // never moves -> reference stays valid
+      if (actorVisible.has(id)) return;       // actor knows it -> pinned by (a), does not move
+      if (countOnly) { countOnlyRefIds.add(id); return; }  // count-only metric -> identity irrelevant
+      quarantineIds.add(id);                  // identity-bearing private reference -> unsupported
+    };
+    const scan = (v: any, path: string, countOnly: boolean) => {
+      if (v == null) return;
+      if (typeof v === "string") { if (idUniverse.has(v)) classify(v, countOnly); return; }
+      if (Array.isArray(v)) { for (const x of v) scan(x, path, countOnly); return; }
+      if (typeof v === "object") {
+        for (const k of Object.keys(v)) {
+          const childPath = path ? `${path}.${k}` : k;
+          const childCountOnly = countOnly || COUNT_ONLY_G_PATHS.has(childPath);
+          if (idUniverse.has(k)) classify(k, childCountOnly);   // card id stored as a MAP KEY (Finding #3)
+          scan(v[k], childPath, childCountOnly);
+        }
+      }
+    };
+    scan(clone.G, "G", false);
+    // cardMeta cross-references (cardsUnder / stackParentId / atLocationId) are identity-bearing
+    // and point at IN-PLAY cards (never repartitioned), so they classify to a no-op — but they are
+    // scanned for completeness / fail-closed coverage.
+    for (const m of Object.values(meta) as any[]) scan(m, "cardMeta", false);
+
+    // a card referenced in BOTH a count-only and an identity-bearing path is quarantined (the
+    // identity-bearing use wins); it is not a "free" count-only ref.
+    for (const id of quarantineIds) countOnlyRefIds.delete(id);
+
+    const actorVisiblePins: Record<string, Map<number, string>> = {};
     for (const zk of zoneKeys) {
       const m = new Map<number, string>();
       const cur: string[] = zc[zk] ?? [];
-      for (let i = 0; i < cur.length; i++) {
-        const cid = cur[i];
-        if (liveRef.has(cid) || known.has(cid)) m.set(i, cid);
-      }
-      pins[zk] = m;
+      for (let i = 0; i < cur.length; i++) if (actorVisible.has(cur[i])) m.set(i, cur[i]);
+      actorVisiblePins[zk] = m;
     }
-    return pins;
+    return { actorVisiblePins, quarantineIds, countOnlyRefIds };
   }
 
-  /** Expose the protected-facts ledger for the CURRENT actor (diagnostic / test / future
-   *  sampler use). Returns, per repartitioned zone, the pinned `[{index,id}]` whose identity (and
-   *  for the deck, position) the determinization must preserve, plus the flat `pinnedIds` union.
-   *  The sampler will consume this to PROPOSE only ledger-respecting worlds; until then the
-   *  server rejects violations fail-closed. */
+  /** Expose the protected-facts ledger for the CURRENT actor (diagnostic / test / future sampler
+   *  use). Returns the ACTOR-VISIBLE positional pins per repartitioned zone (`pins`) + their flat
+   *  union (`pinnedIds`) — the ONLY identity the determinization constrains — kept DISTINCT from
+   *  `quarantineIds`, the repartitioned hidden cards carrying an identity-bearing private engine
+   *  reference (which make the state unsupported, not pinned). The sampler proposes worlds that
+   *  reproduce `pins` and avoid `quarantineIds`. */
   protectedFacts(): {
-    self: string | null; pins: Record<string, { index: number; id: string }[]>; pinnedIds: string[];
+    self: string | null; pins: Record<string, { index: number; id: string }[]>;
+    pinnedIds: string[]; quarantineIds: string[]; countOnlyRefIds: string[];
   } {
     const actor = this.currentActor();
-    if (!actor) return { self: null, pins: {}, pinnedIds: [] };
+    if (!actor) return { self: null, pins: {}, pinnedIds: [], quarantineIds: [], countOnlyRefIds: [] };
     const oppId = actor === CANONICAL_PLAYER_ONE ? CANONICAL_PLAYER_TWO : CANONICAL_PLAYER_ONE;
     const clone: any = structuredClone(this.engine.getAuthoritativeState());
     const zoneKeys = [`hand:${oppId}`, `inkwell:${oppId}`, `deck:${oppId}`, `deck:${actor}`];
-    const raw = this.collectProtectedFacts(clone, actor, zoneKeys);
+    const { actorVisiblePins, quarantineIds, countOnlyRefIds } = this.collectProtectedFacts(clone, actor, zoneKeys);
     const pins: Record<string, { index: number; id: string }[]> = {};
     const union = new Set<string>();
     for (const zk of zoneKeys) {
-      pins[zk] = [...raw[zk].entries()].map(([index, id]) => ({ index, id }));
+      pins[zk] = [...actorVisiblePins[zk].entries()].map(([index, id]) => ({ index, id }));
       for (const { id } of pins[zk]) union.add(id);
     }
-    return { self: actor, pins, pinnedIds: [...union] };
+    return {
+      self: actor, pins, pinnedIds: [...union],
+      quarantineIds: [...quarantineIds], countOnlyRefIds: [...countOnlyRefIds],
+    };
   }
 
   /** Validate that a REWRITTEN clone is internally consistent BEFORE it is committed via
@@ -587,6 +663,15 @@ class Session {
         if (typeof e.ownerID !== "string" || typeof e.controllerID !== "string") {
           throw new Error(`determinize_world: clone cardIndex missing owner/controller for ${cardId}`);
         }
+      }
+    }
+    // Finding #6: REVERSE-INDEX orphans — every `cardIndex` entry must point at a lane that
+    // actually contains it (a clean baseline has zero). A repartition that left a stale forward
+    // index would surface here even if the lane→index direction above happened to pass.
+    for (const [cardId, e] of Object.entries(idx) as [string, any][]) {
+      const lane = zc[e.zoneKey];
+      if (!lane || !lane.includes(cardId)) {
+        throw new Error(`determinize_world: clone reverse-index orphan ${cardId} (cardIndex -> ${e?.zoneKey ?? "<none>"} which does not contain it)`);
       }
     }
   }
@@ -627,13 +712,30 @@ class Session {
       const moving = prev.zoneKey !== zoneKey;
       idx[cardId] = { zoneKey, index: i, ownerID: prev.ownerID, controllerID: prev.controllerID };
       if (!moving) continue;                                // staying card: keep its meta, index already set
-      // Finding #4: zone-transition metadata contract for a MOVED card — reject unsupported
-      // special meta instead of guessing.
+      // Findings #4 + #7: zone-transition metadata contract for a MOVED card — every meta key/value
+      // gets EXPLICIT semantics (reject OR documented clear), never a silent discard.
+      //   * unknown key                  -> REJECT (play-context state we don't model as hidden).
+      //   * damage != 0                  -> REJECT (a hidden-pool card is undamaged; a damaged
+      //                                     card is an in-play instance that must not be relocated).
+      //   * isDrying                     -> REJECT (drying is summoning-sickness, play-only).
+      //   * publicFaceState === "faceUp" -> REJECT (face-up == publicly visible, not hidden).
+      //   * revealed (truthy)            -> CLEAR (explicit): a card reassigned to a NEW hidden
+      //                                     position is freshly hidden there, so its stale reveal
+      //                                     flag is dropped. This must NOT reject — an
+      //                                     opponent-PRIVATE reveal is not actor knowledge
+      //                                     (Finding #2), so the belief stays free to vary it.
+      //   * state / damage(==0)          -> normalized by the clean rebuild below.
       const own = meta[cardId] ?? {};
       for (const k of Object.keys(own)) {
         if (!HIDDEN_ZONE_META_ALLOW.has(k)) {
           throw new Error(`determinize_world: card ${cardId} carries unsupported meta '${k}' for hidden-zone transition into ${zoneKey}`);
         }
+      }
+      if ((own.damage ?? 0) !== 0) {
+        throw new Error(`determinize_world: card ${cardId} has non-zero damage (${own.damage}) and cannot be moved into hidden ${zoneKey}`);
+      }
+      if (own.isDrying) {
+        throw new Error(`determinize_world: card ${cardId} is drying and cannot be moved into hidden ${zoneKey}`);
       }
       if (own.publicFaceState === "faceUp") {
         throw new Error(`determinize_world: card ${cardId} is face-up (known) and cannot be moved into hidden ${zoneKey}`);
@@ -659,12 +761,15 @@ class Session {
    *    - the requested opponent partition must conserve the authoritative hidden pool exactly;
    *    - a supplied selfDeckIds must be a count-correct, duplicate-free permutation of the
    *      authoritative self deck (conservation);
-   *    - the world must reproduce EVERY protected fact (`collectProtectedFacts`): each position
-   *      whose current card is actor-known (reveal / scry / static top-deck, from the engine's
-   *      own fog projection) or live-referenced (anywhere in `G` or a `cardMeta` cross-ref) must
-   *      keep that exact id at that exact index — across ALL four repartitioned zones, decks
-   *      positionally. This closes the "revealed deck card slides off top" and "ignores the
-   *      acting player's self deck" gaps and rejects worlds that would break a live reference.
+   *    - the world must reproduce every ACTOR-VISIBLE protected fact (`collectProtectedFacts`):
+   *      each position whose current card is actor-known (reveal `visibleTo` / scry / static
+   *      top-deck, from the engine's own fog projection) keeps that exact id at that exact index
+   *      across ALL four repartitioned zones (decks positionally). This closes the "revealed deck
+   *      card slides off top" and "ignores the acting player's self deck" gaps WITHOUT pinning any
+   *      hidden identity the actor cannot see (count-only private metrics are ignored);
+   *    - the state must carry NO identity-bearing private engine reference to a repartitioned
+   *      HIDDEN card the actor cannot see — such a state is QUARANTINED (unsupported), because
+   *      pinning would condition the posterior on hidden truth and remapping is unsafe.
    *  Validation runs ENTIRELY before any mutation, and the rewritten clone is re-validated
    *  (`validateCloneConsistency`) before `loadState`, so a rejected request leaves the live
    *  engine state unchanged. After repartition it reconciles `cardIndex` + `cardMeta`
@@ -725,16 +830,19 @@ class Session {
     const sDeck = `deck:${selfId}`;
     const curSelf: string[] = zc[sDeck] ?? [];
 
-    // ---- Findings #1 + #2: observer-aware protected-facts ledger ----
-    // Compute, for every repartitioned zone, the positions whose current card is actor-known
-    // (reveal window / scry / static top-deck) OR live-referenced anywhere in `G`/`cardMeta`.
-    // The requested world must reproduce each pinned (zone,index)->id EXACTLY; otherwise it
-    // rewrites a known fact or breaks a live reference -> reject fail-closed.
-    const pins = this.collectProtectedFacts(clone, selfId, [oHand, oInk, oDeck, sDeck]);
+    // ---- observer-aware protected-facts ledger (actor-visible pins SEPARATE from engine refs) ----
+    // `actorVisiblePins` = positions whose current card the ACTOR legally sees (the only exact-id
+    // constraint). `quarantineIds` = repartitioned hidden cards carrying an identity-bearing
+    // private engine reference: such a state is UNSUPPORTED (pinning would leak hidden truth,
+    // remapping is unsafe) -> reject the whole determinization fail-closed, before any mutation.
+    const { actorVisiblePins, quarantineIds } = this.collectProtectedFacts(clone, selfId, [oHand, oInk, oDeck, sDeck]);
+    if (quarantineIds.size > 0) {
+      throw new Error(`determinize_world: unsupported state — identity-bearing private engine reference to hidden card(s) ${[...quarantineIds].join(", ")} (cannot pin without leaking, cannot safely remap)`);
+    }
     const enforcePins = (zoneKey: string, req: string[]) => {
-      for (const [i, id] of pins[zoneKey]) {
+      for (const [i, id] of actorVisiblePins[zoneKey]) {
         if (req[i] !== id) {
-          throw new Error(`determinize_world: world violates a protected fact in ${zoneKey} at slot ${i} (expected ${id}, got ${req[i] ?? "<none>"})`);
+          throw new Error(`determinize_world: world violates an actor-visible fact in ${zoneKey} at slot ${i} (expected ${id}, got ${req[i] ?? "<none>"})`);
         }
       }
     };
@@ -743,7 +851,7 @@ class Session {
     enforcePins(oDeck, reqDeck);
 
     // ---- self deck: honor a supplied order (pins enforced), else seeded shuffle pinning the
-    //      protected (scryed / statically-revealed / live-referenced) positions in place ----
+    //      actor-visible (scryed / statically-revealed) positions in place ----
     let newSelf: string[];
     if (world.selfDeckIds !== null && world.selfDeckIds !== undefined) {
       const reqSelf = asIds(world.selfDeckIds, "selfDeckIds");
@@ -756,7 +864,7 @@ class Session {
       enforcePins(sDeck, reqSelf);
       newSelf = [...reqSelf];
     } else {
-      newSelf = this.seededShufflePinned([...curSelf], world.seed, new Set(pins[sDeck].keys()));
+      newSelf = this.seededShufflePinned([...curSelf], world.seed, new Set(actorVisiblePins[sDeck].keys()));
     }
 
     // ---- ALL admission checks passed: now mutate (cardIndex + cardMeta reconciled per zone) ----
@@ -1049,20 +1157,26 @@ class Session {
       // sampler — never the trunk / info-set key. The actor's OWN hidden cards are NOT redacted
       // (the actor legally knows its own inkwell/mulligan identities).
       if (Boolean(c.hidden) && c.ownerId !== selfId) {
-        const slot = typeof c.zoneIndex === "number"
-          ? c.zoneIndex
-          : ((oppSlotSeq[c.zone] = (oppSlotSeq[c.zone] ?? 0) + 1) - 1);
-        // Null ONLY the identity-bearing fields (id / definition / name / printed stats /
-        // keywords). PUBLIC physical state stays — opponent spent (exerted) ink and any damage
-        // counters are public knowledge, so preserving them does not leak the card's identity.
+        // Finding #4: do NOT trust the projection's `zoneIndex` for placeholder uniqueness — the
+        // native projection assigns slot 0 to EVERY hidden limbo card, so duplicate placeholders
+        // would collide and overwrite token positions in serialization. Use a per-zone running
+        // counter, giving each redacted opponent hidden card a distinct, position-stable slot
+        // (counts are conserved across a determinization, so the assignment is invariant to a
+        // hidden identity swap).
+        const slot = (oppSlotSeq[c.zone] = (oppSlotSeq[c.zone] ?? 0) + 1) - 1;
+        // Finding #5: redaction is ZONE-SPECIFIC — only fields PROVEN public for that hidden zone
+        // survive. Opponent INKWELL exertion is public (spent ink), so it is forwarded; every
+        // other hidden zone (hand / deck / limbo / …) exposes no per-card physical state, so those
+        // rows are neutral. Identity (id / definition / name / printed stats / keywords) is always
+        // nulled; the real ids live solely in obs["hidden"] for the search-only sampler.
+        const isInk = c.zone === "inkwell";
         cards.push({
           id: `oppslot:${c.zone}:${slot}`,
           owner: 1, zone: c.zone, cardType: "unknown",
-          cost: 0, strength: 0, willpower: 0, lore: 0,
-          damage: c.damage ?? 0,
-          exerted: Boolean(c.exerted),
-          drying: Boolean(c.drying),
-          ready: !c.exerted,
+          cost: 0, strength: 0, willpower: 0, lore: 0, damage: 0,
+          exerted: isInk ? Boolean(c.exerted) : false,
+          drying: false,
+          ready: isInk ? !c.exerted : true,
           keywords: [],
           definitionId: null, name: null, hidden: true,
         });
