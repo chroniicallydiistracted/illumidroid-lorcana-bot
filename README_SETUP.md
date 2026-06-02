@@ -12,13 +12,13 @@ This package is for the illumidroid-lorcana-bot repository and provides the Clau
 - technical-spike skill
 - expanded Codex QA skills
 
-This package does **not** replace these authoritative root files:
+This package does **not** replace these authoritative repository files:
 
 ```text
 AGENTS.md
 CLAUDE.md
-headless_lorcana_engine_porting_blueprint.md
-headless_lorcana_engine_porting_symbol_registry.md
+docs/port/headless_lorcana_engine_porting_blueprint.md
+docs/port/headless_lorcana_engine_porting_symbol_registry.md
 ```
 
 Those files remain the source of truth.
@@ -35,11 +35,13 @@ illumidroid-lorcana-bot/
   skills/
   scripts/
   docs/
+    port/
+      headless_lorcana_engine_porting_blueprint.md
+      headless_lorcana_engine_porting_symbol_registry.md
+      port-status.md
   prompts/
   AGENTS.md
   CLAUDE.md
-  headless_lorcana_engine_porting_blueprint.md
-  headless_lorcana_engine_porting_symbol_registry.md
 ```
 
 Do not install these files into your WSL home directory unless your WSL home directory is the repository root.
@@ -140,7 +142,7 @@ codex-skills/lorcana-technical-spike/SKILL.md
 Recommended local audit command:
 
 ```bash
-codex "Audit the current diff against AGENTS.md, CLAUDE.md, the blueprint, and the symbol registry. Do not edit files. Produce blockers only."
+codex "Audit the current diff against AGENTS.md, CLAUDE.md, docs/port/headless_lorcana_engine_porting_blueprint.md, and docs/port/headless_lorcana_engine_porting_symbol_registry.md. Do not edit files. Produce blockers only."
 ```
 
 Recommended PR comment:
@@ -148,7 +150,7 @@ Recommended PR comment:
 ```text
 @codex review
 
-Audit this PR against AGENTS.md, CLAUDE.md, the blueprint, and the symbol registry.
+Audit this PR against AGENTS.md, CLAUDE.md, docs/port/headless_lorcana_engine_porting_blueprint.md, and docs/port/headless_lorcana_engine_porting_symbol_registry.md.
 Focus on parity drift, dependency-order violations, missing conformance tests,
 missing registry updates, deterministic-order bugs, and any change to the TypeScript oracle.
 Do not suggest style-only changes unless they hide correctness risk.
@@ -271,7 +273,7 @@ mv .github/workflows/agent-guardrails.example.yml .github/workflows/agent-guardr
 Added:
 
 ```text
-docs/port-status.md
+docs/port/port-status.md
 ```
 
 Codex should keep this updated after PRs merge.

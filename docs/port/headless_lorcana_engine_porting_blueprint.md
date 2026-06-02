@@ -3189,7 +3189,7 @@ performance-only rewrites before parity
 Maintain this document throughout the port:
 
 ```text
-headless_lorcana_engine_porting_symbol_registry.md
+docs/port/headless_lorcana_engine_porting_symbol_registry.md
 ```
 
 The registry exists for AI developer agents that resume after context

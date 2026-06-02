@@ -20,7 +20,7 @@ internal design.
 The active porting source of truth is:
 
 ```text
-headless_lorcana_engine_porting_blueprint.md
+docs/port/headless_lorcana_engine_porting_blueprint.md
 ```
 
 Read that file before starting any port-related work.
@@ -50,7 +50,7 @@ For the active port, resolve conflicts in this order:
    oracle for compatibility.
 2. Official Lorcana TCG rules, when deciding whether the oracle itself needs a
    separate upstream/runtime correction.
-3. `headless_lorcana_engine_porting_blueprint.md`.
+3. `docs/port/headless_lorcana_engine_porting_blueprint.md`.
 4. Current repository architecture.
 5. Existing tests.
 6. Legacy helper names, comments, APIs, or convenience abstractions.
@@ -66,7 +66,7 @@ Rust is the selected port language unless the user explicitly reopens the
 language decision. The chosen stack is documented in:
 
 ```text
-headless_lorcana_engine_porting_blueprint.md
+docs/port/headless_lorcana_engine_porting_blueprint.md
 ```
 
 Required baseline:
@@ -148,7 +148,7 @@ Avoid:
 Maintain this file throughout port development:
 
 ```text
-headless_lorcana_engine_porting_symbol_registry.md
+docs/port/headless_lorcana_engine_porting_symbol_registry.md
 ```
 
 Every implementation change that creates, renames, removes, or changes the

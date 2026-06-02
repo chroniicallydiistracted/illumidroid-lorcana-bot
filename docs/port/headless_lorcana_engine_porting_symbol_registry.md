@@ -28,8 +28,9 @@ removed
 
 | Symbol / Name | Kind | Location | Purpose | Oracle source | Parity notes | Status | Updated |
 |---|---|---|---|---|---|---|---|
-| `headless_lorcana_engine_porting_blueprint.md` | document | repo root | Active dependency-driven porting plan | n/a | Must be read before port work | implemented | 2026-06-02 |
-| `headless_lorcana_engine_porting_symbol_registry.md` | document | repo root | Compact symbol/name registry for future agents | n/a | Must be updated with symbol changes | implemented | 2026-06-02 |
+| `docs/port/headless_lorcana_engine_porting_blueprint.md` | document | `docs/port` | Active dependency-driven porting plan | n/a | Must be read before port work | implemented | 2026-06-02 |
+| `docs/port/headless_lorcana_engine_porting_symbol_registry.md` | document | `docs/port` | Compact symbol/name registry for future agents | n/a | Must be updated with symbol changes | implemented | 2026-06-02 |
+| `docs/port/port-status.md` | document | `docs/port` | Operational status tracker for each blueprint step | n/a | Tracks progress only; not a behavior oracle | implemented | 2026-06-02 |
 | `AGENTS.md` | document | repo root | Root agent instructions | n/a | Controls active objective and Rust stack | implemented | 2026-06-02 |
 | `CLAUDE.md` | document | repo root | Root Claude-specific instructions | n/a | Must match root objective in `AGENTS.md` | implemented | 2026-06-02 |
 | `lorcana-simulator/packages/lorcana/lorcana-engine/src/core/runtime/match-runtime.random-apis.ts` | TypeScript source | simulator engine | Oracle RNG and shuffle behavior | TypeScript GameEngine | Rust RNG must match default `seedrandom` called with the seed/draws string | implemented | 2026-06-02 |
