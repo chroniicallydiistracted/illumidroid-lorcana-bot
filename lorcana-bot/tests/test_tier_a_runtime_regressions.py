@@ -129,8 +129,8 @@ def test_full_ismcts_seed_reproducible() -> None:
     assert first == second
 
 
-@_red("Phase 2 must preserve ink and deck when the hidden hand is empty")
 def test_sampler_zero_hand_keeps_ink_and_deck() -> None:
+    # Phase 2 landed: a zero hand_count over a non-empty pool still assigns inkwell + deck.
     worlds = sample_worlds(
         ["a", "b", "c"],
         np.array([0.7, 0.6, 0.5]),
@@ -143,8 +143,8 @@ def test_sampler_zero_hand_keeps_ink_and_deck() -> None:
     assert worlds[0].opponent_deck_ids
 
 
-@_red("Phase 2 must calculate non-trivial structured-uniform importance ratios")
 def test_uniform_structured_sampler_has_nontrivial_rho() -> None:
+    # Phase 2 landed: structured uniform proposal yields non-trivial importance ratios.
     worlds = sample_worlds(
         ["a", "b", "c", "d", "e"],
         np.array([0.95, 0.8, 0.4, 0.2, 0.05]),
@@ -158,8 +158,8 @@ def test_uniform_structured_sampler_has_nontrivial_rho() -> None:
     assert np.std([world.rho for world in worlds]) > 1e-6
 
 
-@_red("Phase 2 must retain raw rho instead of rebasing sampled weights")
 def test_uniform_sampler_rho_is_raw_target_over_proposal() -> None:
+    # Phase 2 landed: rho is stored as the raw b/q (exp(log_target - log_proposal)).
     worlds = sample_worlds(
         ["a", "b", "c", "d"],
         np.array([0.9, 0.7, 0.2, 0.1]),
@@ -172,8 +172,8 @@ def test_uniform_sampler_rho_is_raw_target_over_proposal() -> None:
         assert np.isclose(world.rho, np.exp(world.log_target - world.log_proposal))
 
 
-@_red("Phase 3 must expose an atomic determinize_world bridge operation")
 def test_bridge_exposes_full_world_determinize_rpc() -> None:
+    # Phase 3 landed: the bridge exposes an atomic full-`World` determinize_world operation.
     assert callable(getattr(LorcanaEngine, "determinize_world"))
 
 

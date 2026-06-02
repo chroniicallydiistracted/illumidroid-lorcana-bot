@@ -10,9 +10,12 @@ Audited checkpoint:
 
 ```text
 Phase 0   complete — belief-guided clean-label sample writing fails closed
-Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Phase 13  baseline installed — 6 passing probes (2 Phase-1 + 3 Phase-2 + 1 Phase-3) + 14 strict expected-red probes
 Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
-Next      Phase 2 structured sampler math
+Phase 2   complete — audited GO for exact structured sampling + importance semantics
+Phase 3   IN REMEDIATION (NO-GO) — full-`World` RPC built + bounded findings fixed; protected-
+          facts ledger partial (reveals guarded; static top-deck/pending/§15 open) + F3 unresolved
+Next      close Phase 3 blockers before Phase 7
 ```
 
 Clean-label belief-guided training remains blocked. Legacy root-pooled PIMC is
@@ -1403,8 +1406,10 @@ Priority: **Medium**
 
 For Tier-A belief-search correctness, this historical backlog order is superseded
 by the dependency-ordered commit sequence in
-`tier-a-belief-search-remediation-plan.md`. The immediate next step is Phase 2
-structured sampler math.
+`tier-a-belief-search-remediation-plan.md`. Phases 1–2 are complete and audited; Phase 3
+(full-world bridge RPC) is IN REMEDIATION (NO-GO) — bounded findings fixed but the
+protected-facts ledger + obs sanitization remain open. The next dependency work is to close
+the Phase 3 blockers before Phase 7.
 
 1. Exact `run_paths` execution integrity
 2. League path parity with default self-play

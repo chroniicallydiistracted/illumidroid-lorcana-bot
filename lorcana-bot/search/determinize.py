@@ -53,12 +53,57 @@ def _default_base_seed(pool_ids: list[str], probs, hand_count: int, n_worlds: in
     h.update(ib)
     return f"sw:{h.hexdigest()}"
 
-_EPS = 1e-9
 _CLIP = 1e-6
+_PROPOSALS = frozenset({"belief", "uniform"})
 
 
 class WorldContractError(ValueError):
     """A `World` violates the canonical full-hidden-zone determinization contract."""
+
+
+def _require_sampler_count(value, key: str, *, maximum: int | None = None) -> int:
+    """Read a sampler count without coercion or clamping."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise WorldContractError(f"{key} must be a non-negative int, got {type(value).__name__} {value!r}")
+    count = int(value)
+    if count < 0:
+        raise WorldContractError(f"{key} must be non-negative, got {count}")
+    if maximum is not None and count > maximum:
+        raise WorldContractError(f"{key} {count} exceeds maximum {maximum}")
+    return count
+
+
+def _validate_proposal(proposal: str) -> str:
+    if not isinstance(proposal, str) or proposal not in _PROPOSALS:
+        raise WorldContractError(f"proposal must be one of {sorted(_PROPOSALS)}, got {proposal!r}")
+    return proposal
+
+
+def _validate_pool_ids(pool_ids) -> list[str]:
+    if not isinstance(pool_ids, (list, tuple)):
+        raise WorldContractError("pool_ids must be list-like")
+    ids = list(pool_ids)
+    if any(not isinstance(cid, str) or not cid.strip() for cid in ids):
+        raise WorldContractError("pool_ids must contain non-empty string ids")
+    if len(ids) != len(set(ids)):
+        raise WorldContractError("pool_ids must not contain duplicate ids")
+    return ids
+
+
+def _validate_probability_vector(values, key: str, *, size: int | None = None) -> np.ndarray:
+    try:
+        probs = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise WorldContractError(f"{key} must be a numeric probability vector") from exc
+    if probs.ndim != 1:
+        raise WorldContractError(f"{key} must be one-dimensional, got shape {probs.shape}")
+    if size is not None and len(probs) != size:
+        raise WorldContractError(f"{key} length {len(probs)} != pool size {size}")
+    if not np.all(np.isfinite(probs)):
+        raise WorldContractError(f"{key} must contain only finite probabilities")
+    if np.any((probs < 0.0) | (probs > 1.0)):
+        raise WorldContractError(f"{key} probabilities must be in [0, 1]")
+    return np.clip(probs, _CLIP, 1 - _CLIP)
 
 
 def _require_public_count(d, key: str, who: str) -> int:
@@ -240,31 +285,38 @@ class World:
 # ---------------------------------------------------------------------------
 # Exact count-conditioned independent-Bernoulli subset sampling
 # ---------------------------------------------------------------------------
-def _es_mass(probs: np.ndarray, k: int) -> np.ndarray:
-    """Suffix DP of the count-conditioned Bernoulli mass.
+def _log_es_mass(probs: np.ndarray, k: int) -> np.ndarray:
+    """Log-domain suffix DP of the count-conditioned Bernoulli mass.
 
-    `f[i][j]` = Σ over subsets of items `i..n-1` of size `j` of
+    `exp(f[i][j])` = Σ over subsets of items `i..n-1` of size `j` of
     `Π_{chosen} p · Π_{not chosen} (1-p)` (each of those items contributes p if in
-    the subset, 1-p otherwise). `f[0][k]` is the normalizer `Z = Σ_{|S|=k} b(S)`.
-    Returned shape `[n+1, k+1]` (float64).
+    the subset, 1-p otherwise). `f[0][k]` is `log Z`, where
+    `Z = Σ_{|S|=k} b(S)`. Keeping the DP in log space prevents the underflow that
+    would otherwise silently change a low-mass target into a uniform proposal.
     """
-    n = len(probs)
-    f = np.zeros((n + 1, k + 1), dtype=np.float64)
-    f[n, 0] = 1.0
+    p = _validate_probability_vector(probs, "probs")
+    n = len(p)
+    k = _require_sampler_count(k, "k", maximum=n)
+    log_p = np.log(p)
+    log_not_p = np.log1p(-p)
+    f = np.full((n + 1, k + 1), -math.inf, dtype=np.float64)
+    f[n, 0] = 0.0
     for i in range(n - 1, -1, -1):
-        p = probs[i]
-        f[i, 0] = f[i + 1, 0] * (1.0 - p)
+        f[i, 0] = log_not_p[i] + f[i + 1, 0]
         for j in range(1, k + 1):
-            f[i, j] = (1.0 - p) * f[i + 1, j] + p * f[i + 1, j - 1]
+            f[i, j] = np.logaddexp(
+                log_not_p[i] + f[i + 1, j],
+                log_p[i] + f[i + 1, j - 1],
+            )
     return f
 
 
 def _log_bernoulli_subset(probs: np.ndarray, chosen: np.ndarray) -> float:
     """log b(subset) under independent Bernoulli: Σ_in log p + Σ_out log(1-p)."""
-    p = np.clip(probs, _CLIP, 1 - _CLIP)
+    p = _validate_probability_vector(probs, "probs")
     mask = np.zeros(len(p), dtype=bool)
     mask[chosen] = True
-    return float(np.log(p[mask]).sum() + np.log(1 - p[~mask]).sum())
+    return float(np.log(p[mask]).sum() + np.log1p(-p[~mask]).sum())
 
 
 def _conditional_bernoulli(probs: np.ndarray, k: int, rng: np.random.Generator
@@ -275,26 +327,31 @@ def _conditional_bernoulli(probs: np.ndarray, k: int, rng: np.random.Generator
     q(S) = b(S) / Z with Z = f[0][k]; since the target is the same count-conditioned
     distribution, log_target == log_proposal and ρ == 1 exactly.
     """
-    n = len(probs)
-    p = np.clip(probs, _CLIP, 1 - _CLIP)
-    f = _es_mass(p, k)
-    Z = f[0, k]
-    if not (Z > 0.0):                              # numerical underflow safeguard
-        chosen = rng.choice(n, size=k, replace=False)
-        logq = -_log_comb(n, k)
-        return np.sort(chosen), logq
+    p = _validate_probability_vector(probs, "probs")
+    n = len(p)
+    k = _require_sampler_count(k, "k", maximum=n)
+    f = _log_es_mass(p, k)
+    log_z = float(f[0, k])
+    if not math.isfinite(log_z):
+        raise WorldContractError("count-conditioned Bernoulli normalizer is not finite")
     chosen: list[int] = []
     r = k
     for i in range(n):
         if r == 0:
             break
-        denom = f[i, r]
-        p_choose = (p[i] * f[i + 1, r - 1] / denom) if denom > 0 else 0.0
+        if n - i == r:
+            chosen.extend(range(i, n))
+            r = 0
+            break
+        log_choose = math.log(p[i]) + f[i + 1, r - 1]
+        p_choose = math.exp(min(0.0, log_choose - f[i, r]))
         if rng.random() < p_choose:
             chosen.append(i)
             r -= 1
+    if r != 0:
+        raise WorldContractError("count-conditioned Bernoulli sampler did not fill its slots")
     chosen_arr = np.array(sorted(chosen), dtype=int)
-    logq = _log_bernoulli_subset(p, chosen_arr) - math.log(Z)
+    logq = _log_bernoulli_subset(p, chosen_arr) - log_z
     return chosen_arr, logq
 
 
@@ -304,70 +361,98 @@ def _log_comb(n: int, k: int) -> float:
 
 def _log_Z(probs: np.ndarray, k: int) -> float:
     """log Σ_{|S|=k} b(S) — the count-conditioned Bernoulli normalizer."""
-    p = np.clip(probs, _CLIP, 1 - _CLIP)
-    Z = _es_mass(p, k)[0, k]
-    return math.log(Z) if Z > 0 else -math.inf
+    return float(_log_es_mass(probs, k)[0, k])
 
 
 # ---------------------------------------------------------------------------
 # Exact count-constrained joint 3-zone (hand / inkwell / deck) assignment (§5.1)
 # ---------------------------------------------------------------------------
 def _joint_zone(hand_probs: np.ndarray, ink_probs: np.ndarray,
-                n_hand: int, n_ink: int, rng: np.random.Generator
-                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Exact constrained categorical zone assignment.
+                n_hand: int, n_ink: int, rng: np.random.Generator,
+                proposal: str = "belief",
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+    """Exact count-constrained categorical zone assignment over hand / inkwell / deck.
 
-    Each card i is assigned to hand / inkwell / deck with weights proportional to
-    (hand_probs[i], ink_probs[i], deck_w[i]=max(1-hand-ink, eps)), conditioned on
-    exactly `n_hand` cards in hand and `n_ink` in inkwell (the rest -> deck). DP over
-    `(card_index, hand_slots, ink_slots)`; returns (hand_idx, ink_idx, deck_idx,
-    log q) with q the exact proposal pmf of the sampled assignment.
+    Each card i is assigned with weights proportional to (hand_probs[i], ink_probs[i],
+    deck_w[i]=max(1-hand-ink, eps)), conditioned on exactly `n_hand` in hand and `n_ink`
+    in inkwell (rest -> deck). A DP over `(card_index, hand_slots, ink_slots)` gives the
+    normalizer Z, so the STRUCTURED target probability of any assignment is known exactly:
+    `b(A) = (Π_z weight_z(A)) / Z`.
+
+    Returns `(hand_idx, ink_idx, deck_idx, log_target, log_proposal)`:
+      * `proposal="belief"` samples FROM the structured target, so `log_proposal ==
+        log_target` and `rho == 1` exactly;
+      * `proposal="uniform"` samples a UNIFORM zone assignment, so `log_proposal` is the
+        uniform pmf `1 / (C(n,H)·C(n-H,K))` and `log_target` is the structured probability
+        — `rho = exp(log_target - log_proposal)` then varies and reweights toward the belief.
     """
-    n = len(hand_probs)
-    hp = np.clip(hand_probs, _CLIP, 1 - _CLIP)
-    kp = np.clip(ink_probs, _CLIP, 1 - _CLIP)
+    proposal = _validate_proposal(proposal)
+    hp = _validate_probability_vector(hand_probs, "hand_probs")
+    n = len(hp)
+    kp = _validate_probability_vector(ink_probs, "ink_probs", size=n)
     dp = np.clip(1.0 - hp - kp, _CLIP, None)
-    H, K = n_hand, n_ink
-    # g[i][h][k] = mass of assigning items i..n-1 with h to hand, k to inkwell
-    g = np.zeros((n + 1, H + 1, K + 1), dtype=np.float64)
-    g[n, 0, 0] = 1.0
+    H = _require_sampler_count(n_hand, "n_hand", maximum=n)
+    K = _require_sampler_count(n_ink, "n_ink", maximum=n - H)
+    log_hp, log_kp, log_dp = np.log(hp), np.log(kp), np.log(dp)
+    # exp(g[i][h][k]) = mass of assigning items i..n-1 with h hand and k ink slots.
+    g = np.full((n + 1, H + 1, K + 1), -math.inf, dtype=np.float64)
+    g[n, 0, 0] = 0.0
     for i in range(n - 1, -1, -1):
         for h in range(0, H + 1):
             for k in range(0, K + 1):
-                v = dp[i] * g[i + 1, h, k]
+                v = log_dp[i] + g[i + 1, h, k]
                 if h > 0:
-                    v += hp[i] * g[i + 1, h - 1, k]
+                    v = np.logaddexp(v, log_hp[i] + g[i + 1, h - 1, k])
                 if k > 0:
-                    v += kp[i] * g[i + 1, h, k - 1]
+                    v = np.logaddexp(v, log_kp[i] + g[i + 1, h, k - 1])
                 g[i, h, k] = v
-    Z = g[0, H, K]
-    hand_idx: list[int] = []
-    ink_idx: list[int] = []
-    deck_idx: list[int] = []
-    if not (Z > 0.0):                              # underflow -> uniform residual fallback
+    log_z = float(g[0, H, K])
+    if not math.isfinite(log_z):
+        raise WorldContractError("structured-zone normalizer is not finite")
+    uniform_logp = -(_log_comb(n, H) + _log_comb(n - H, K))
+
+    def _log_target(hand_idx, ink_idx, deck_idx) -> float:
+        s = (sum(log_hp[i] for i in hand_idx)
+             + sum(log_kp[i] for i in ink_idx)
+             + sum(log_dp[i] for i in deck_idx))
+        return s - log_z
+
+    if proposal == "uniform":
         order = rng.permutation(n)
         hand_idx = sorted(order[:H].tolist())
         ink_idx = sorted(order[H:H + K].tolist())
         deck_idx = sorted(order[H + K:].tolist())
-        logq = -(_log_comb(n, H) + _log_comb(n - H, K))
-        return (np.array(hand_idx, int), np.array(ink_idx, int),
-                np.array(deck_idx, int), logq)
+        return (np.array(hand_idx, int), np.array(ink_idx, int), np.array(deck_idx, int),
+                _log_target(hand_idx, ink_idx, deck_idx), uniform_logp)
+
+    # belief: sample from the structured target -> proposal == target (rho == 1)
     h, k = H, K
-    log_q = 0.0
+    hand_idx: list[int] = []
+    ink_idx: list[int] = []
+    deck_idx: list[int] = []
     for i in range(n):
-        tot = g[i, h, k]
-        w_deck = dp[i] * g[i + 1, h, k]
-        w_hand = hp[i] * g[i + 1, h - 1, k] if h > 0 else 0.0
-        w_ink = kp[i] * g[i + 1, h, k - 1] if k > 0 else 0.0
-        u = rng.random() * tot
-        if u < w_hand:
-            hand_idx.append(i); h -= 1; log_q += math.log(max(w_hand, _EPS)) - math.log(tot)
-        elif u < w_hand + w_ink:
-            ink_idx.append(i); k -= 1; log_q += math.log(max(w_ink, _EPS)) - math.log(tot)
+        log_weights = np.array([
+            log_hp[i] + g[i + 1, h - 1, k] if h > 0 else -math.inf,
+            log_kp[i] + g[i + 1, h, k - 1] if k > 0 else -math.inf,
+            log_dp[i] + g[i + 1, h, k],
+        ])
+        max_weight = float(log_weights.max())
+        if not math.isfinite(max_weight):
+            raise WorldContractError("structured-zone sampler reached an impossible state")
+        weights = np.exp(log_weights - max_weight)
+        weights /= weights.sum()
+        u = rng.random()
+        if u < weights[0]:
+            hand_idx.append(i); h -= 1
+        elif u < weights[0] + weights[1]:
+            ink_idx.append(i); k -= 1
         else:
-            deck_idx.append(i); log_q += math.log(max(w_deck, _EPS)) - math.log(tot)
-    return (np.array(hand_idx, int), np.array(ink_idx, int),
-            np.array(deck_idx, int), log_q)
+            deck_idx.append(i)
+    if h != 0 or k != 0:
+        raise WorldContractError("structured-zone sampler did not fill its slots")
+    log_target = _log_target(hand_idx, ink_idx, deck_idx)
+    return (np.array(hand_idx, int), np.array(ink_idx, int), np.array(deck_idx, int),
+            log_target, log_target)
 
 
 # ---------------------------------------------------------------------------
@@ -393,49 +478,69 @@ def sample_worlds(pool_ids: list[str], probs: np.ndarray, hand_count: int,
     worlds and seeds.
     """
     rng = rng or np.random.default_rng()
-    if n_worlds <= 0:
-        return []
+    pool_ids = _validate_pool_ids(pool_ids)
     n = len(pool_ids)
-    hand_count = max(0, min(int(hand_count), n))
-    base = base_seed or _default_base_seed(pool_ids, probs, hand_count, n_worlds,
-                                           proposal, ink_probs, ink_count)
-    if n == 0 or hand_count == 0:
+    proposal = _validate_proposal(proposal)
+    n_worlds = _require_sampler_count(n_worlds, "n_worlds")
+    hand_count = _require_sampler_count(hand_count, "hand_count", maximum=n)
+    ink_count = _require_sampler_count(ink_count, "ink_count", maximum=n - hand_count)
+    probs = _validate_probability_vector(probs, "probs", size=n)
+    ink_probs_arr = (_validate_probability_vector(ink_probs, "ink_probs", size=n)
+                     if ink_probs is not None else None)
+    if base_seed is not None and (not isinstance(base_seed, str) or not base_seed.strip()):
+        raise WorldContractError("base_seed must be a non-empty string when supplied")
+    base = base_seed if base_seed is not None else _default_base_seed(
+        pool_ids, probs, hand_count, n_worlds, proposal, ink_probs_arr, ink_count)
+    if n_worlds == 0:
+        return []
+    # Only a genuinely EMPTY hidden pool yields empty opponent zones. A zero hand_count with
+    # a non-empty pool must still partition inkwell + deck (Phase 2 fix).
+    if n == 0:
         return [World(weight=1.0, rho=1.0, seed=f"{base}:particle={i}")
                 for i in range(n_worlds)]
 
-    probs = np.clip(np.asarray(probs, dtype=np.float64), _CLIP, 1 - _CLIP)
     log_target_norm = _log_Z(probs, hand_count)    # normalizer of the count-conditioned target
-    joint = ink_probs is not None and ink_count > 0 and (hand_count + ink_count) <= n
-    ink_probs_arr = (np.clip(np.asarray(ink_probs, dtype=np.float64), _CLIP, 1 - _CLIP)
-                     if ink_probs is not None else None)
+    joint = ink_probs_arr is not None
 
     specs: list[tuple] = []        # (hand_idx, ink_idx, deck_idx, log_target, log_proposal)
     for _ in range(n_worlds):
         if joint:
-            hand_idx, ink_idx, deck_idx, logq = _joint_zone(
-                probs, ink_probs_arr, hand_count, ink_count, rng)
-            # target == proposal for direct posterior sampling -> ρ == 1 exactly
-            logt = logq if proposal != "uniform" else logq
+            hand_idx, ink_idx, deck_idx, logt, logq = _joint_zone(
+                probs, ink_probs_arr, hand_count, ink_count, rng, proposal=proposal)
             specs.append((hand_idx, ink_idx, deck_idx, logt, logq))
             continue
         if proposal == "uniform":
-            chosen = np.sort(rng.choice(n, size=hand_count, replace=False))
-            logq = -_log_comb(n, hand_count)
-            logt = _log_bernoulli_subset(probs, chosen) - log_target_norm
-        else:  # exact count-conditioned Bernoulli posterior
+            chosen = (np.sort(rng.choice(n, size=hand_count, replace=False))
+                      if hand_count > 0 else np.array([], dtype=int))
+            logq = -_log_comb(n, hand_count)         # uniform proposal pmf over size-k subsets
+            logt = _log_bernoulli_subset(probs, chosen) - log_target_norm   # structured target
+        else:  # exact count-conditioned Bernoulli posterior -> q == b exactly
             chosen, logq = _conditional_bernoulli(probs, hand_count, rng)
-            logt = logq                              # q == b exactly -> ρ == 1
+            logt = logq
         rest = np.array([j for j in range(n) if j not in set(chosen.tolist())], dtype=int)
         rng.shuffle(rest)
-        ink_take = max(0, min(ink_count, len(rest)))
-        ink_idx = np.sort(rest[:ink_take])
-        deck_idx = np.sort(rest[ink_take:])
+        ink_idx = np.sort(rest[:ink_count])
+        deck_idx = np.sort(rest[ink_count:])
+        # The residual hand-complement split is sampled uniformly. Keep that factor in
+        # both audit logs: it cancels in rho, but belongs to each full-zone world pmf.
+        residual_logp = -_log_comb(n - hand_count, ink_count)
+        logt += residual_logp
+        logq += residual_logp
         specs.append((chosen, ink_idx, deck_idx, logt, logq))
 
+    # rho = RAW exact importance weight b/q (NEVER rebased) — == 1 for the belief proposal.
     log_rho = np.array([t - q for (_, _, _, t, q) in specs], dtype=np.float64)
-    rho = np.exp(log_rho - log_rho.max())          # raw exact importance weight (rebased)
-    # normalized weight used by the legacy root pooling (Σ over worlds == n_worlds)
-    w = rho / rho.sum() * n_worlds if rho.sum() > 0 else np.ones(n_worlds)
+    if not np.all(np.isfinite(log_rho)):
+        raise WorldContractError("importance log-ratios must be finite")
+    rho_raw = np.exp(log_rho)
+    if not np.all(np.isfinite(rho_raw)):
+        raise WorldContractError("importance ratios are not representable as finite floats")
+    # weight = SEPARATE normalized/log-stabilized weight for pooling (Σ over worlds == n_worlds).
+    stable = np.exp(log_rho - log_rho.max())
+    stable_sum = stable.sum()
+    if not math.isfinite(float(stable_sum)) or not stable_sum > 0:
+        raise WorldContractError("normalized importance weights are not finite")
+    weight = stable / stable_sum * n_worlds
 
     worlds: list[World] = []
     for i, (hand_idx, ink_idx, deck_idx, logt, logq) in enumerate(specs):
@@ -445,6 +550,6 @@ def sample_worlds(pool_ids: list[str], probs: np.ndarray, hand_count: int,
             opponent_deck_ids=tuple(pool_ids[j] for j in deck_idx),
             seed=f"{base}:particle={i}",
             log_target=float(logt), log_proposal=float(logq),
-            rho=float(rho[i]), weight=float(w[i]),
+            rho=float(rho_raw[i]), weight=float(weight[i]),
         ))
     return worlds

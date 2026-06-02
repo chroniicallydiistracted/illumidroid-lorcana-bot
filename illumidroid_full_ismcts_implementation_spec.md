@@ -21,9 +21,12 @@ Audited current checkpoint:
 
 ```text
 Phase 0   complete — belief-guided clean-label sample writing fails closed
-Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Phase 13  baseline installed — 6 passing probes (2 Phase-1 + 3 Phase-2 + 1 Phase-3) + 14 strict expected-red probes
 Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
-Next      Phase 2 structured sampler math
+Phase 2   complete — audited GO for exact structured sampling + importance semantics
+Phase 3   IN REMEDIATION (NO-GO) — full-`World` RPC built + bounded findings fixed; protected-
+          facts ledger partial (reveals guarded; static top-deck/pending/§15 open) + F3 unresolved
+Next      close Phase 3 blockers before Phase 7
 ```
 
 Sections labeled “current” below describe the pre-remediation audit baseline unless
@@ -931,10 +934,13 @@ turn caps, and auxiliary targets consistently.
 - **DONE (Phase 1 audited GO):** define the canonical full reproducible `World`
   contract, strict opponent hidden-pool witness validation, and clean-label seed
   admission checks.
-- Add exact count-constrained hand/inkwell assignment sampler from #5.
+- **DONE (Phase 2 audited GO):** add log-domain exact count-constrained hand and
+  hand/inkwell/deck assignment samplers from #5, raw `rho`, normalized `weight`,
+  complete assignment audit logs, structured zero-ink handling, and fail-closed
+  sampler input validation.
 - Keep `rho`, `log_target`, and `log_proposal` diagnostics.
-- **PARTIAL:** Phase 1 world-contract tests landed; Phase 2/12 add sampler math and
-  end-to-end deterministic replay proofs.
+- **PARTIAL:** Phase 1 world-contract and Phase 2 sampler-math tests landed; Phase 12
+  adds end-to-end deterministic replay proofs.
 
 ### `lorcana-bot/search/belief_filter.py`
 

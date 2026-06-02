@@ -5,9 +5,10 @@ import math
 from collections import Counter
 
 import numpy as np
+import pytest
 
 from search.determinize import (
-    sample_worlds, World,
+    sample_worlds, World, WorldContractError,
     _conditional_bernoulli, _joint_zone, _log_bernoulli_subset, _log_Z, _log_comb,
 )
 from search.belief_filter import ParticleFilter, BeliefTracker
@@ -219,7 +220,7 @@ def test_5_joint_zone_marginals_match_brute_force():
     rng = np.random.default_rng(3)
     hc = np.zeros(n); kc = np.zeros(n); N = 40000
     for _ in range(N):
-        hand_idx, ink_idx, deck_idx, _ = _joint_zone(hp, kp, H, K, rng)
+        hand_idx, ink_idx, deck_idx, _, _ = _joint_zone(hp, kp, H, K, rng)
         assert len(hand_idx) == H and len(ink_idx) == K and len(deck_idx) == n - H - K
         assert sorted(hand_idx.tolist() + ink_idx.tolist() + deck_idx.tolist()) == list(range(n))
         hc[hand_idx] += 1; kc[ink_idx] += 1
@@ -289,3 +290,195 @@ def test_belief_tracker_seeds_reweights_reseeds():
     t.worlds(pool[1:], probs[1:], 4, 8)
     assert t.reseeds == 3
     assert all(len(w.hand_ids) == 4 for w in t.pf.to_worlds(8))
+
+
+# --- Tier-A Phase 2: structured sampler + importance-weight semantics ----------
+def test_structured_zero_hand_preserves_inkwell_and_deck():
+    """Phase 2: a zero hand_count over a NON-empty pool still partitions inkwell + deck
+    (only a genuinely empty pool yields empty opponent zones)."""
+    pool = ["a", "b", "c", "d"]
+    ws = sample_worlds(pool, np.array([0.5, 0.5, 0.5, 0.5]), 0, 5,
+                       ink_probs=np.array([0.6, 0.5, 0.4, 0.3]), ink_count=2,
+                       rng=np.random.default_rng(0))
+    for w in ws:
+        assert w.opponent_hand_ids == ()
+        assert len(w.opponent_inkwell_ids) == 2
+        assert len(w.opponent_deck_ids) == 2
+        assert sorted(list(w.opponent_inkwell_ids) + list(w.opponent_deck_ids)) == sorted(pool)
+
+
+def test_structured_uniform_proposal_rho_is_not_forced_one():
+    """Phase 2: structured (joint) uniform proposal must produce NON-trivial importance
+    ratios — the old code forced log_target == log_proposal so rho collapsed to 1."""
+    ws = sample_worlds(["a", "b", "c", "d", "e"], np.array([0.95, 0.8, 0.4, 0.2, 0.05]),
+                       2, 100, proposal="uniform", ink_probs=np.array([0.05, 0.3, 0.7, 0.8, 0.9]),
+                       ink_count=1, rng=np.random.default_rng(1))
+    rho = np.array([w.rho for w in ws])
+    assert rho.std() > 1e-6 and not np.allclose(rho, 1.0)
+
+
+def test_structured_uniform_weight_normalizes_but_rho_remains_raw():
+    """Phase 2: `rho` is the RAW b/q (== exp(log_target - log_proposal)); `weight` is the
+    SEPARATE normalized pooling weight (Σ == n_worlds)."""
+    ws = sample_worlds(["a", "b", "c", "d", "e"], np.array([0.9, 0.7, 0.5, 0.3, 0.1]),
+                       2, 50, proposal="uniform", ink_probs=np.array([0.1, 0.3, 0.5, 0.7, 0.9]),
+                       ink_count=1, rng=np.random.default_rng(2))
+    for w in ws:
+        assert np.isclose(w.rho, np.exp(w.log_target - w.log_proposal))   # raw, not rebased
+    weight = np.array([w.weight for w in ws])
+    assert abs(weight.sum() - len(ws)) < 1e-6 and weight.std() > 0
+
+
+def test_belief_proposal_keeps_exact_rho_one():
+    """Phase 2: both hand-only and joint BELIEF proposals keep rho == 1 exactly."""
+    hand_only = sample_worlds(["a", "b", "c", "d"], np.array([0.8, 0.6, 0.4, 0.2]), 2, 20,
+                              rng=np.random.default_rng(3))
+    joint = sample_worlds(["a", "b", "c", "d", "e"], np.array([0.8, 0.6, 0.4, 0.2, 0.1]), 2, 20,
+                          ink_probs=np.array([0.2, 0.3, 0.4, 0.5, 0.6]), ink_count=1,
+                          rng=np.random.default_rng(4))
+    for w in hand_only + joint:
+        assert abs(w.rho - 1.0) < 1e-12
+        assert abs(w.log_target - w.log_proposal) < 1e-12
+
+
+def test_joint_zone_uniform_target_probability_matches_bruteforce():
+    """Phase 2: under uniform proposal the joint sampler's log_target equals the brute-force
+    structured (count-constrained joint categorical) probability, and log_proposal equals the
+    uniform pmf."""
+    hp = np.array([0.6, 0.4, 0.3, 0.2])
+    kp = np.array([0.2, 0.3, 0.3, 0.2])
+    H, K, n = 1, 1, 4
+    dp = np.clip(1 - hp - kp, 1e-9, None)
+    Z = 0.0
+    for hand in itertools.combinations(range(n), H):
+        rest = [i for i in range(n) if i not in hand]
+        for ink in itertools.combinations(rest, K):
+            hs, is_ = set(hand), set(ink)
+            w = 1.0
+            for c in range(n):
+                w *= hp[c] if c in hs else kp[c] if c in is_ else dp[c]
+            Z += w
+    logZ = math.log(Z)
+    rng = np.random.default_rng(0)
+    for _ in range(80):
+        h, i, d, lt, lp = _joint_zone(hp, kp, H, K, rng, proposal="uniform")
+        hs, is_, ds = set(h.tolist()), set(i.tolist()), set(d.tolist())
+        assert len(hs) == H and len(is_) == K and len(ds) == n - H - K
+        wt = 1.0
+        for c in range(n):
+            wt *= hp[c] if c in hs else kp[c] if c in is_ else dp[c]
+        assert np.isclose(lt, math.log(wt) - logZ)                       # structured target
+        assert np.isclose(lp, -(_log_comb(n, H) + _log_comb(n - H, K)))  # uniform proposal
+
+
+def test_world_seed_is_populated_for_every_sample():
+    """Phase 2/Phase 1: EVERY sampled world carries a non-empty string seed — across
+    hand-only, zero-hand-joint, uniform, and the empty-pool path."""
+    cases = [
+        dict(hand_count=2),
+        dict(hand_count=0, ink_probs=np.array([0.5, 0.5, 0.5]), ink_count=1),
+        dict(hand_count=2, proposal="uniform"),
+    ]
+    for kw in cases:
+        hc = kw.pop("hand_count")
+        ws = sample_worlds(["a", "b", "c"], np.array([0.6, 0.5, 0.4]), hc, 4,
+                           rng=np.random.default_rng(0), **kw)
+        assert len(ws) == 4 and all(isinstance(w.seed, str) and w.seed for w in ws)
+    empty = sample_worlds([], np.array([]), 0, 3, rng=np.random.default_rng(0))
+    assert len(empty) == 3 and all(isinstance(w.seed, str) and w.seed for w in empty)
+
+
+def test_log_domain_hand_sampler_does_not_underflow_at_lorcana_pool_size():
+    """Phase 2 closure: a Lorcana-sized, low-mass hand target stays exact and finite
+    instead of falling back to uniform sampling or producing inf rho / unit weights."""
+    pool = [f"c{i}" for i in range(60)]
+    probs = np.linspace(0.999998, 0.999999, len(pool))
+    log_z = _log_Z(probs, 1)
+    assert math.isfinite(log_z)
+    chosen, log_q = _conditional_bernoulli(probs, 1, np.random.default_rng(3))
+    assert np.isclose(log_q, _log_bernoulli_subset(probs, chosen) - log_z)
+    worlds = sample_worlds(pool, probs, 1, 16, proposal="uniform", rng=np.random.default_rng(4))
+    assert all(math.isfinite(w.rho) and math.isfinite(w.weight) for w in worlds)
+    assert np.isclose(sum(w.weight for w in worlds), len(worlds))
+    assert all(np.isclose(w.rho, np.exp(w.log_target - w.log_proposal)) for w in worlds)
+
+
+def test_log_domain_joint_sampler_does_not_uniformize_underflow_target():
+    """Phase 2 closure: the structured DP keeps its true non-uniform target even when
+    the probability-space implementation would underflow on a 60-card pool."""
+    n = 60
+    hp = np.linspace(0.51, 0.99, n)
+    kp = np.linspace(0.99, 0.51, n)
+    dp = np.clip(1.0 - hp - kp, 1e-6, None)
+    base = float(np.log(dp).sum())
+    assignment_logs = [
+        math.log(hp[h]) + math.log(kp[k]) + base - math.log(dp[h]) - math.log(dp[k])
+        for h in range(n) for k in range(n) if h != k
+    ]
+    log_z = float(np.logaddexp.reduce(assignment_logs))
+    hand, ink, _deck, log_target, log_proposal = _joint_zone(
+        hp, kp, 1, 1, np.random.default_rng(7), proposal="uniform")
+    h, k = int(hand[0]), int(ink[0])
+    expected = math.log(hp[h]) + math.log(kp[k]) + base - math.log(dp[h]) - math.log(dp[k]) - log_z
+    assert np.isclose(log_target, expected)
+    assert not np.isclose(log_target, log_proposal)
+
+
+def test_structured_zero_ink_world_uses_joint_deck_channel():
+    """Phase 2 closure: supplying ink probabilities activates the three-zone target
+    even when the public inkwell count is zero."""
+    pool = ["a", "b", "c"]
+    hp = np.array([0.80, 0.40, 0.20])
+    kp = np.array([0.15, 0.50, 0.70])
+    dp = np.clip(1.0 - hp - kp, 1e-6, None)
+    raw = np.array([hp[h] * np.prod([dp[j] for j in range(len(pool)) if j != h])
+                    for h in range(len(pool))])
+    target = raw / raw.sum()
+    worlds = sample_worlds(pool, hp, 1, 250, proposal="uniform", ink_probs=kp, ink_count=0,
+                           rng=np.random.default_rng(11))
+    assert {w.opponent_hand_ids[0] for w in worlds} == set(pool)
+    for world in worlds:
+        h = pool.index(world.opponent_hand_ids[0])
+        assert np.isclose(world.log_target, math.log(target[h]))
+        assert np.isclose(world.rho, target[h] * len(pool))
+
+
+def test_unstructured_world_logs_include_uniform_residual_partition():
+    """Phase 2 closure: hand-only fallback logs still describe the complete zone
+    assignment, including the uniformly sampled residual inkwell subset."""
+    pool = ["a", "b", "c", "d"]
+    probs = np.array([0.8, 0.6, 0.4, 0.2])
+    world = sample_worlds(pool, probs, 1, 1, proposal="uniform", ink_count=1,
+                          rng=np.random.default_rng(9))[0]
+    chosen = np.array([pool.index(world.opponent_hand_ids[0])])
+    residual_logp = -_log_comb(len(pool) - 1, 1)
+    assert np.isclose(world.log_proposal, -_log_comb(len(pool), 1) + residual_logp)
+    assert np.isclose(world.log_target, _log_bernoulli_subset(probs, chosen) - _log_Z(probs, 1)
+                      + residual_logp)
+
+
+@pytest.mark.parametrize(("override", "match"), [
+    ({"proposal": "unifrom"}, "proposal"),
+    ({"probs": np.array([np.nan, 0.5, 0.5])}, "finite"),
+    ({"probs": np.array([0.5, 0.5])}, "length"),
+    ({"hand_count": -1}, "hand_count"),
+    ({"hand_count": 4}, "hand_count"),
+    ({"ink_count": -1}, "ink_count"),
+    ({"ink_count": 3}, "ink_count"),
+    ({"pool_ids": ["a", "a", "c"]}, "duplicate"),
+    ({"ink_probs": np.array([0.5, 0.5])}, "ink_probs"),
+    ({"base_seed": "   "}, "base_seed"),
+])
+def test_sampler_rejects_malformed_public_inputs(override, match):
+    """Phase 2 closure: malformed proposal inputs fail closed instead of being coerced."""
+    args = {
+        "pool_ids": ["a", "b", "c"],
+        "probs": np.array([0.6, 0.5, 0.4]),
+        "hand_count": 1,
+        "ink_count": 1,
+        "n_worlds": 1,
+        "rng": np.random.default_rng(0),
+    }
+    args.update(override)
+    with pytest.raises(WorldContractError, match=match):
+        sample_worlds(**args)

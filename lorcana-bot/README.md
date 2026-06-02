@@ -11,9 +11,10 @@ importance-weighted determinization**, leaf-batched GPU inference) → training
 fail-closed until the full hidden-zone shared-tree release gate passes. Run
 `../train.sh --no-belief` for non-belief diagnostics only.
 Audited checkpoint: Phase 0 guard complete; Phase 13 baseline installed
-(2 passing Phase-1 probes + 18 strict expected-red probes); Phase 1 canonical
-full hidden-zone `World` boundary complete and audited GO. Phase 2 structured
-sampler math is next.
+(5 passing probes: 2 Phase-1 + 3 Phase-2; 15 strict expected-red probes); Phase 1
+canonical full hidden-zone `World` boundary complete and audited GO; Phase 2 exact
+structured sampler math and importance semantics complete and audited GO. Phase 3
+full-world bridge RPC or Phase 5 full-world tracker is next.
 See `../CLAUDE.md` for current state + commands, `../lorcana-simulator/lorcana-bot-architecture.md`
 for the design, `PORT-AUDIT.md` for the engine-port analysis, and the phase
 reports in `../lorcana-simulator/phase{1,2,3}/`.
@@ -111,10 +112,12 @@ clean-label self-play remains blocked until the structured full-world,
 shared-tree path passes the Tier-A release gate in
 `../tier-a-belief-search-remediation-plan.md`.
 
-Phase 1 of that remediation is complete: `search/determinize.py` now defines the
-canonical reproducible `World`, validates the complete opponent hidden-pool
-witness fail-closed, and enforces clean-label seed admission. The next active
-remediation step is Phase 2 sampler math.
+Phases 1 and 2 of that remediation are complete: `search/determinize.py` defines
+the canonical reproducible `World`, validates the complete opponent hidden-pool
+witness fail-closed, enforces clean-label seed admission, and samples exact
+log-domain hand/inkwell/deck targets with raw `rho` separated from normalized
+pooling `weight`. The next dependency work is Phase 3 full-world bridge RPC or
+Phase 5 full-world tracker.
 
 ## Real decks
 

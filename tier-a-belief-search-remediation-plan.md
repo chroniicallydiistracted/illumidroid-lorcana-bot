@@ -39,13 +39,22 @@ Audited implementation checkpoint:
 
 ```text
 Phase 0   complete — belief-guided clean-label sample writing fails closed
-Phase 13  baseline installed — 20 runtime probes total: 2 passing Phase-1 probes,
-          18 strict expected-red probes owned by later phases
+Phase 13  baseline installed — 20 runtime probes total: 6 passing probes
+          (2 Phase-1 + 3 Phase-2 + 1 Phase-3), 14 strict expected-red probes owned by later phases
 Phase 1   complete — audited GO
-Next      Phase 2 structured sampler math
+Phase 2   complete — audited GO (structured sampler + raw rho / normalized weight)
+Phase 3   IN REMEDIATION — NO-GO. The full-`World` determinize_world bridge/server RPC is built
+          and the bounded re-review findings are fixed (cardIndex/cardMeta reconcile, owner/
+          controller preserve, summary invariance, seat==currentActor, exact-order agreement,
+          metadata allowlist, extended consistency oracle). REMAINING BLOCKERS: the
+          protected-facts ledger is only PARTIAL (reveal-window mechanism is guarded fail-closed;
+          static top-deck visibility, pending-effect card references, and opponent-perspective
+          §15 facts are NOT yet covered), and opponent hidden-instance-ID sanitization in
+          observations (F3) is unresolved (it conflicts with the search-only sampler design).
+Next      CLOSE the Phase 3 blockers (protected-facts ledger + F3) before Phase 7.
 ```
 
-The latest verification is `111 passed / 18 xfailed` (`129` collected);
+The latest verification is `153 passed / 14 xfailed`;
 `compileall` and `git diff --check` are clean. Clean-label belief-guided training
 remains blocked until the final Tier A release gate.
 
@@ -59,13 +68,25 @@ zone cardinalities, duplicate freedom, and malformed input before Phase 2 can
 sample from that pool. Active bridge paths still pass only hand IDs through
 determinization, which remains the Phase 3/7 gap.
 
-`EngineSimulator.begin_lane()` restores the snapshot and calls `engine.determinize(self_id, list(world.opponent_hand_ids), seed=...)`, ignoring sampled opponent inkwell, opponent deck, and self deck fields.
+Phase 3 added the full-`World` `determinize_world` RPC (bridge `determinize_world()` +
+server `Session.determinizeWorld()`), which honors the exact opponent hand/inkwell/deck
+partition and optional self-deck order, fails closed on malformed/duplicate/non-conserving
+specs, uses no ambient randomness (deterministic self-deck shuffle from `World.seed`), and
+returns the realized partition for verification. `EngineSimulator.begin_lane()` still calls
+the diagnostic hand-only `engine.determinize(self_id, list(world.opponent_hand_ids), seed=...)`,
+ignoring sampled opponent inkwell/deck + self deck — wiring it to `determinize_world` is the
+remaining **Phase 7** gap.
 
-The Python bridge exposes `determinize(self_id, hand_instance_ids, seed)` only, and the TypeScript server RPC likewise accepts only `handInstanceIds`; this makes full-zone `World` specs impossible to honor through the current bridge contract.
+The diagnostic hand-only `determinize(self_id, hand_instance_ids, seed)` path remains for
+`run_pimc_diagnostic` only and still uses `Math.random` when unseeded; it is gated and
+invalid for clean-label training. The clean-label `determinizeWorld` path contains no
+ambient randomness.
 
-The TypeScript wrapper’s determinizer repartitions opponent inkwell/deck from the remaining hidden pool and shuffles self deck, but it uses `Math.random` when no seed is supplied.
-
-`sample_worlds()` still has the audited defects: zero-card/zero-hand returns empty default `World` objects, structured joint uniform currently sets `log_target == log_proposal`, and `rho` is rebased before storage even though the docstring says raw `b/q`.
+`sample_worlds()` now uses log-domain exact DPs for both the hand-only and structured
+three-zone targets, retains raw `rho = b/q` separately from normalized pooling
+`weight`, preserves zero-hand inkwell/deck assignments, and rejects malformed sampler
+inputs fail-closed. Structured mode remains active for a supplied inkwell channel even
+when the public inkwell count is zero.
 
 `BeliefTracker` currently tracks hand-only particles as `frozenset`s, returns hand-only `World` objects, and persistent reweighting multiplies only included-card probabilities while omitting excluded-card likelihood terms.
 
@@ -416,9 +437,61 @@ No code path can call determinization with only hand IDs unless it is explicitly
 
 ## Phase 2 — fix the structured sampler and importance-weight semantics
 
+### Status
+
+Completed — audited GO. The three audited `sample_worlds()` defects are fixed in
+`search/determinize.py`:
+- **Zero-hand drops ink/deck:** the empty-world early return now fires ONLY for a genuinely
+  empty pool (`n == 0`); a zero `hand_count` over a non-empty pool still partitions inkwell +
+  deck (`ink_count` validated against `n - hand_count`).
+- **Structured uniform forced `rho == 1`:** `_joint_zone` now takes `proposal` and returns
+  `(hand_idx, ink_idx, deck_idx, log_target, log_proposal)`. `proposal="belief"` samples from
+  the structured DP target (so `log_proposal == log_target`, `rho == 1`); `proposal="uniform"`
+  samples a uniform zone assignment, so `log_proposal` is the uniform pmf and `log_target` is
+  the structured (DP-normalized) probability — `rho` then varies.
+- **`rho` silently rebased:** `rho` is now the RAW `exp(log_target - log_proposal)` (never
+  rebased; `== 1` for belief), and `weight` is a SEPARATE log-stabilized normalized pooling
+  weight (Σ over worlds == n_worlds).
+
+Proof: `tests/test_determinize.py` (+6 named Phase-2 tests:
+`test_structured_zero_hand_preserves_inkwell_and_deck`,
+`test_structured_uniform_proposal_rho_is_not_forced_one`,
+`test_structured_uniform_weight_normalizes_but_rho_remains_raw`,
+`test_belief_proposal_keeps_exact_rho_one`,
+`test_joint_zone_uniform_target_probability_matches_bruteforce`,
+`test_world_seed_is_populated_for_every_sample`) + the three Phase-2-owned Phase 13 probes
+converted to passing (`test_sampler_zero_hand_keeps_ink_and_deck`,
+`test_uniform_structured_sampler_has_nontrivial_rho`,
+`test_uniform_sampler_rho_is_raw_target_over_proposal`). The remaining 15 probes still fail at
+their owned assertions (no fixture/API masking, no XPASS). Full suite **134 passed / 15
+xfailed**; `compileall` + `git diff --check` clean. Clean-label belief training stays blocked
+(Phase 0 guard); the structured uniform proposal is not yet wired into any training path
+(that is Phase 4/5/6). `_joint_zone`'s new 5-tuple return updated its one existing test caller.
+
+Closure hardening after audit re-review:
+- Both exact DPs now operate in log space with `np.logaddexp`, so low-mass Lorcana-sized
+  targets cannot underflow into silently uniform worlds or produce `rho=inf`.
+- Supplying `ink_probs` always activates the structured three-zone target, including
+  `ink_count == 0`; the deck channel remains `max(1-hand-ink, eps)` in that edge case.
+- The public sampler rejects unknown proposal modes, malformed/duplicate pools,
+  non-finite or shape-mismatched probability vectors, invalid counts, and empty
+  supplied base seeds instead of coercing or clamping them.
+- Hand-only fallback audit logs include the residual uniform inkwell-partition factor,
+  so `log_target` and `log_proposal` describe complete zone assignments even where the
+  shared factor cancels in `rho`.
+
+Additional closure proof in `tests/test_determinize.py`:
+`test_log_domain_hand_sampler_does_not_underflow_at_lorcana_pool_size`,
+`test_log_domain_joint_sampler_does_not_uniformize_underflow_target`,
+`test_structured_zero_ink_world_uses_joint_deck_channel`,
+`test_unstructured_world_logs_include_uniform_residual_partition`, and the
+10-case `test_sampler_rejects_malformed_public_inputs`. Full suite **134 passed / 15
+xfailed**; all 15 remaining Phase-13 probes still fail at their later-phase-owned
+assertions under `--runxfail`; `compileall` + `git diff --check` clean.
+
 ### Problem
 
-`sample_worlds()` currently violates its public contract in three ways:
+At remediation start, `sample_worlds()` violated its public contract in three ways:
 
 1. Zero-hand or zero-card cases return default empty `World` objects, dropping inkwell/deck assignments.
 2. Structured joint `proposal="uniform"` still sets `log_target == log_proposal`, forcing `rho == 1`.
@@ -502,6 +575,85 @@ The sampler’s math, docs, and stored fields agree. A test must fail if `rho` i
 ---
 
 ## Phase 3 — extend bridge/server determinization to accept full `World` specs
+
+### Status
+
+**IN REMEDIATION — NO-GO (second re-review).** The full-`World` RPC is built and the bounded
+re-review findings are fixed + tested, but the deep information-set-consistency work is NOT
+complete, so Phase 3 is **not** GO. Second re-review (8 findings) outcome:
+- **FIXED + tested:** F2 metadata allowlist (no whole-object transfer between identities; only
+  the public inkwell ready/exerted scalar is preserved slot-wise); F4 owner/controller preserved
+  from the card's own cardIndex entry (per native `zone-operations.ts:212`); F5 public zone
+  summaries left byte-for-byte unchanged on a count-preserving repartition; F6 `selfId` must equal
+  `currentActor()`; F7 consistency oracle extended (badOwner / orphan reverse-index / summaries /
+  revealedIds; note `cardIndex.index` is optional in the engine so a positional check is reported
+  but not asserted); F8 docs + bridge docstring corrected.
+- **F1 PARTIAL (fail-closed):** a reveal-window protected-fact guard rejects any world that moves
+  a card currently known via `ctx.zones.reveals.active` (manual inking / scry / look) out of a
+  repartitioned zone — proven by a real-engine rejection+acceptance test against a freshly-inked
+  revealed opponent card. **STILL OPEN:** static top-deck visibility, pending-effect/continuation
+  card references, and opponent-perspective (§15) known facts are NOT covered.
+- **F3 UNRESOLVED:** opponent hidden instance IDs in `obs["hidden"]` are forwarded raw. This is
+  by-design for the search-only sampler (`World.opponent_hidden_pool` needs them; they never reach
+  the trunk/info_set_key), so "sanitizing" them conflicts with the current architecture and needs
+  the server-side sampler / opaque-ID design (spec §6.3/§16) — a real design item, not a quick fix.
+
+Verification: **153 passed / 14 xfailed**; `test_engine_determinize_world.py` 18 tests
+(honor + reject + state-consistency-through-play + ink-preservation + invalid-seat + wrong-actor +
+empty/whitespace-seed + failed-request-preservation + reversed-realized-order + reveal-guard
+reject/accept + reveal-surface). `compileall` + `git diff --check` clean. **Phase 3 stays NO-GO
+until the protected-facts ledger and F3 are closed; clean-label training remains blocked.**
+
+The full-`World` determinization RPC was added (bot-owned bridge/server only; no
+`lorcana-simulator/packages/**` change):
+- `engine/node_server/server.ts` `Session.determinizeWorld(selfId, world)` + `handle` case
+  `"determinize_world"`: assigns the opponent hand/inkwell/deck EXACTLY from the spec and the
+  self-deck order exactly when supplied; **fails closed (throws)** on non-string/empty ids,
+  per-zone count mismatch vs the public zone sizes, duplicate id across opponent zones, a
+  partition that does not conserve the authoritative hidden pool, and a self-deck that is not
+  a count-correct duplicate-free permutation of the authoritative self deck; **no ambient
+  randomness** — an omitted self-deck order is shuffled deterministically from `World.seed`
+  (a missing/empty seed in that case is rejected); returns the REALIZED post-load partition.
+- `engine/bridge.py` `determinize_world(self_id, world)`: serializes the `World`, raises
+  `BridgeError` on any server rejection, and asserts the realized partition matches the
+  request per zone (multiset, defense in depth); stashes `last_world_realized`.
+
+Proof: `tests/test_engine_determinize_world.py` (10 real-engine tests, incl. the completion
+criterion — two different requested inkwell assignments produce two different ACTUAL inkwell
+assignments; exact self-deck order honored; duplicate/missing-pool/malformed/duplicate-self/
+conservation rejections; same-seed reproducibility; a static guard that `determinizeWorld`
+contains no `Math.random`). The Phase-3-owned probe
+`test_bridge_exposes_full_world_determinize_rpc` is converted to passing. Full suite
+**145 passed / 14 xfailed** (no XPASS; the 14 remaining probes still fail at their owned
+assertions); `compileall` + `git diff --check` clean.
+
+Re-review NO-GO (findings 1–5) remediated:
+- **F1 (zone-state corruption):** raw `zoneCards` surgery left the engine's parallel
+  `cardIndex` (location) and `cardMeta` (inkwell ready/face state) stale, so `moveCard()`
+  resolved cards in the wrong zone and duplicated instances on the next play. `determinizeWorld`
+  now reconciles all three structures (`reindexZone`): `cardIndex.zoneKey`+`index` are rebuilt,
+  cards moved into hand/deck get fresh zone meta, and the INKWELL's public ready/exerted+face
+  state is preserved SLOT-WISE from the prior occupants. Proven by a `check_consistency` op
+  (`indexMismatches==0`, `multiZone==0`) before AND through 12 real auto-play plies, with the
+  opponent's public available-ink preserved.
+- **F2 (invalid seats):** `selfId` outside the two canonical seats is rejected before any clone/mutation.
+- **F3 (seed bypass):** a non-empty TRIMMED string seed is required for EVERY full-world RPC
+  (both the omitted- and supplied-self-deck paths), not only when shuffling.
+- **F4 (Python ignored order):** the bridge now compares realized vs requested EXACTLY
+  (order-sensitive); a reversed realized deck is a disagreement.
+- **F5 (doc drift):** the checkpoint is reconciled across the plan, audit report, ISMCTS spec,
+  current-state backlog, and `CLAUDE.md`.
+Verification after remediation: **150 passed / 14 xfailed**; `test_engine_determinize_world.py`
+15 tests (10 honor/reject + state-consistency+play/ink, invalid-seat, empty/whitespace-seed,
+failed-request-preserves-state, reversed-realized-order). The F1 test fails on the old
+`zoneCards`-only code (`indexMismatches > 0`).
+
+NOT done here (dependency order): `EngineSimulator.begin_lane()` still uses the diagnostic
+hand-only path — wiring it to `determinize_world` + asserting the realized world matches is
+**Phase 7** (Commit 6). The diagnostic hand-only `determinize` (with its `Math.random` for the
+unseeded case AND the same not-yet-reconciled cardIndex/cardMeta) remains gated for
+`run_pimc_diagnostic` only; Phase 7 replaces its use with `determinizeWorld`. Clean-label
+training stays blocked (Phase 0 guard).
 
 ### Problem
 
@@ -1681,9 +1833,13 @@ Every available edge used by progressive widening has a prior derived from an ac
 
 Use this order. Keep clean-label training blocked until Commit 16 passes. Each commit adds or converts its owning regression tests; do not accumulate test work at the end.
 
-Current checkpoint: Commits 1–3 are complete and audited. Commit 2 remains an
-incrementally converting regression parent until Commit 16. **Next: Commit 4 /
-Phase 2 structured sampler math.**
+Current checkpoint: Commits 1–4 are complete and audited. **Commit 5 / Phase 3 (full-world
+bridge/server RPC) is IN REMEDIATION — NO-GO:** the RPC + bounded findings are done, but the
+protected-facts ledger is only partial (reveal-window guarded; static top-deck / pending-effect
+refs / §15 open) and observation sanitization (F3) is unresolved. Commit 2 remains an
+incrementally converting regression parent until Commit 16. **Next: close the Phase 3 blockers,
+THEN Commit 6 / Phase 7.** Phase 5 tracker work is also unblocked by the dependency graph and
+may proceed independently.
 
 ## Commit 1 — freeze unsafe training — DONE
 
@@ -1710,7 +1866,7 @@ new shared-node edge receives zero prior
 
 Implement Phase 1. Add strict partition validation, explicit optional self-deck semantics, and a required non-empty clean-label seed.
 
-## Commit 4 — structured sampler math — NEXT
+## Commit 4 — structured sampler math — DONE, AUDITED GO
 
 Implement Phase 2. Fix structured zero-hand worlds, true uniform joint proposals, raw `rho`, normalized `weight`, and deterministic sampled-world seeds.
 

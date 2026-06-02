@@ -42,6 +42,7 @@ class LorcanaEngine:
         if not SERVER_TS.exists():
             raise BridgeError(f"server not found: {SERVER_TS}")
         self.timeout = timeout
+        self.last_world_realized: dict | None = None   # Phase 3: realized determinize_world partition
         self._proc = subprocess.Popen(
             [bun, "run", str(SERVER_TS)],
             cwd=str(SIM_ROOT),
@@ -145,6 +146,56 @@ class LorcanaEngine:
         the root snapshot; return each path's leaf observation. One round-trip
         replaces (paths x path-length) per-step calls — the in-process search."""
         return self._rpc({"op": "run_paths", "root": root_snap, "paths": paths})["obs"]
+
+    def determinize_world(self, self_id: str, world) -> dict:
+        """Tier-A Phase 3 — CLEAN-LABEL determinization that HONORS a full `World`: the exact
+        opponent hand/inkwell/deck partition and (when supplied) the exact self-deck order,
+        with NO ambient randomness. The server validates the spec against the authoritative
+        hidden pool and FAILS CLOSED (raises) on any violation; a malformed/duplicate/
+        non-conserving/under-counted spec raises `BridgeError`. Returns the world's obs; the
+        realized partition is stashed in `last_world_realized` and asserted to match the
+        request EXACTLY per zone (ORDER-SENSITIVE, defense in depth). When `self_deck_ids` is
+        None the server shuffles the self deck deterministically from `world.seed` (Math.random
+        is never used)."""
+        spec = {
+            "opponentHandIds": list(world.opponent_hand_ids),
+            "opponentInkwellIds": list(world.opponent_inkwell_ids),
+            "opponentDeckIds": list(world.opponent_deck_ids),
+            "selfDeckIds": (None if world.self_deck_ids is None else list(world.self_deck_ids)),
+            "seed": world.seed,
+        }
+        resp = self._rpc({"op": "determinize_world", "self": self_id, "world": spec})
+        realized = resp.get("realized") or {}
+        self.last_world_realized = realized
+        # defense in depth: the engine must hold EXACTLY the requested opponent partition —
+        # ORDER-SENSITIVE (the Phase 3 exact-agreement requirement; a reversed realized order
+        # is a disagreement, not an acceptable match).
+        for key in ("opponentHandIds", "opponentInkwellIds", "opponentDeckIds"):
+            if list(realized.get(key, [])) != list(spec[key]):
+                raise BridgeError(
+                    f"determinize_world: engine realized a different {key} than requested")
+        if spec["selfDeckIds"] is not None and \
+                list(realized.get("selfDeckIds", [])) != list(spec["selfDeckIds"]):
+            raise BridgeError("determinize_world: engine realized a different self deck than requested")
+        return resp["obs"]
+
+    def check_consistency(self) -> dict:
+        """Phase 3 diagnostic: assert the engine's zone structures agree after determinization
+        — `{indexMismatches, multiZone, total, posMismatches, badOwner, orphanIndex, inkReady,
+        summaries, revealedIds}`. A correct repartition yields `indexMismatches == 0` and
+        `multiZone == 0` (no stale cardIndex, no duplicated card); `badOwner` flags owner OR
+        controller corruption; `revealedIds` is `[{id, zoneKey, index}]` (positional reveal
+        facts); `summaries` is the public per-zone `{count, revision}` (must be unchanged by a
+        hidden repartition)."""
+        return self._rpc({"op": "check_consistency"})["consistency"]
+
+    def protected_facts(self) -> dict:
+        """Phase 3 observer-aware protected-facts ledger for the CURRENT actor:
+        `{self, pins: {zoneKey: [{index, id}]}, pinnedIds: [...]}`. A position is pinned when its
+        current card is actor-known (reveal / scry / static top-deck) or live-referenced anywhere
+        in the runtime state — `determinize_world` rejects any world that moves/reorders a pinned
+        card (Findings #1, #2). Lets a caller construct ledger-respecting worlds."""
+        return self._rpc({"op": "protected_facts"})["protectedFacts"]
 
     def step_exact(self, stable_key: str) -> dict:
         """Execute exactly `stable_key` from the CURRENT (lane) state WITHOUT mutating

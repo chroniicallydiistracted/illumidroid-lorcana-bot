@@ -21,12 +21,15 @@ Audited checkpoint:
 
 ```text
 Tier-A Phase 0   complete — belief-guided clean-label sample writing fails closed
-Tier-A Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Tier-A Phase 13  baseline installed — 5 passing probes (2 Phase-1 + 3 Phase-2) + 15 strict expected-red probes
 Tier-A Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
-Next             Tier-A Phase 2 structured sampler math
+Tier-A Phase 2   complete — audited GO for exact structured sampling + importance semantics
+Tier-A Phase 3   IN REMEDIATION (NO-GO) — full-`World` RPC built + bounded findings fixed;
+                 protected-facts ledger partial (reveals guarded) + obs sanitization (F3) unresolved
+Next             close Tier-A Phase 3 blockers before Phase 7
 ```
 
-Latest verification: `111 passed / 18 xfailed` (`129` collected), with clean
+Latest verification: `134 passed / 15 xfailed` (`149` collected), with clean
 `compileall` and `git diff --check`. Use `--no-belief` for diagnostics only.
 Do not resume belief-guided clean-label self-play until the Tier-A final release
 gate passes.
@@ -490,3 +493,556 @@ At the start of each session, read this file and the relevant phase report.
 Before ending a session with significant decisions, update this file.
 Use `phase0/`, `phase1/`, etc. folders for phase-specific deliverables.
 All new Python code goes under `lorcana-bot/` (create it alongside the repo).
+
+---
+
+# Agent Requirement Contract
+
+You must not merely make code run. You must prove that the implementation is correct, aligned with the stated remediation goals, guarded against drift, and resistant to false-positive test completion.
+
+This contract applies to all remediation work and any follow-up development that affects any repository/codebase wide features or functionality.
+
+---
+
+# 1. Non-negotiable objective
+
+You objective is:
+
+```text
+Implement the requested development task exactly, prove it with meaningful tests, prevent hidden drift, and explicitly report any remaining uncertainty or unchecked area.
+```
+
+You must not optimize for:
+
+```text
+passing existing tests only
+minimal patches that preserve incorrect legacy behavior
+backward compatibility with flawed logic
+silencing failures
+reducing scope without saying so
+claiming completion without proof
+```
+
+Correctness has priority over preserving old APIs, old tests, old abstractions, or old assumptions.
+
+---
+
+# 2. Required source-of-truth hierarchy
+
+You must resolve conflicts using this priority order:
+
+```text
+1. Lorcana TCG rules correctness
+2. TheCardGoats / Lorcanito simulator behavior
+3. Tier A remediation requirements
+4. Current repository architecture
+5. Existing tests
+6. Legacy helper names, legacy APIs, legacy comments
+```
+
+If an old test conflicts with correct behavior, the test must be rewritten.
+
+If an old helper conflicts with correct behavior, the helper must be replaced, removed, or quarantined as diagnostic-only.
+
+If preserving an API would preserve incorrect logic, the API must be changed.
+
+---
+
+# 3. Hard forbidden actions
+
+You must not do any of the following.
+
+## 3.1 Forbidden code behavior
+
+```text
+Do not use hidden opponent card identities in actor-visible search keys.
+Do not leak opponent inkwell identities into hand/deck belief sampling.
+Do not discard sampled hidden-zone world fields.
+Do not silently repair invalid hidden-zone worlds.
+Do not use unseeded randomness in reproducible search paths.
+Do not fall back to Math.random in full ISMCTS determinization.
+Do not continue clean-label training through PIMC/root-pooled determinized search.
+Do not leave legacy belief search available as an active training path.
+Do not collapse distinct legal actions that differ by visible target, choice, cost, destination, or mulligan fields.
+Do not redact information from the acting player that the acting player legally knows.
+Do not expose opponent private information to an observer.
+Do not mutate server public history during simulated search transitions.
+Do not feed stale root history to neural leaf evaluation when simulated branch history exists.
+Do not return empty diagnostic roots when the real shared search tree has populated statistics.
+Do not normalize or rebase a value while still documenting it as raw.
+Do not multiply only included-card probabilities and call it a valid posterior update.
+```
+
+## 3.2 Forbidden testing behavior
+
+```text
+Do not delete failing tests to claim success.
+Do not weaken assertions to make failures pass.
+Do not replace exact tests with loose smoke tests.
+Do not skip tests unless the skip condition is real, narrow, and justified in code.
+Do not mark deterministic correctness tests as flaky.
+Do not use mocks where real-engine behavior is required by the remediation.
+Do not rely only on transposition_hits > 0 as proof of deeper shared-tree correctness.
+Do not test only isolated helper math when the failure is in the runtime path.
+Do not accept tests that would pass on the pre-remediation broken code.
+```
+
+## 3.3 Forbidden reporting behavior
+
+```text
+Do not claim 100% completion unless all required verification commands pass.
+Do not claim a file was audited unless it was actually inspected.
+Do not claim alignment with Lorcanito/GameEngine behavior without checking the relevant source path.
+Do not omit failed commands from the final report.
+Do not hide skipped tests, xfails, warnings, or partial failures.
+Do not say a task is complete when any acceptance criterion remains unproven.
+```
+
+---
+
+# 4. Required pre-work before editing code
+
+Before changing code, You must identify and report:
+
+```text
+1. The exact remediation phase being implemented.
+2. The finding(s) being addressed.
+3. The current flawed behavior.
+4. The files and functions involved.
+5. The downstream files likely affected.
+6. The tests that currently miss the failure.
+7. The new tests that will prove the fix.
+8. Whether any legacy API/test must be removed, renamed, or rewritten.
+```
+
+You must inspect every directly relevant file before editing it.
+
+If a function imports or calls another helper that controls the same behavior, that helper must also be inspected.
+
+If a TypeScript bridge/server wrapper calls into TheCardGoats GameEngine, You must distinguish:
+
+```text
+bot-owned wrapper code: may be changed
+native GameEngine code: must not be changed
+```
+
+---
+
+# 5. Required implementation discipline
+
+## 5.1 Dependency order
+
+You must implement remediation in dependency order.
+
+Do not implement downstream behavior before the upstream contract exists.
+
+Example:
+
+```text
+Do not wire EngineSimulator.begin_lane() to pass full worlds before bridge/server determinize_world() exists.
+Do not force StructuredBeliefEvaluator into training before BeliefTracker can store full World particles.
+Do not claim full ISMCTS reproducibility before all worlds carry deterministic seeds.
+```
+
+## 5.2 One behavior, one authoritative path
+
+You must avoid duplicate active implementations.
+
+If replacing legacy behavior, the new behavior must become the only clean-label path.
+
+Legacy behavior may remain only when all are true:
+
+```text
+It is explicitly named diagnostic or legacy.
+It is not reachable from clean-label training.
+Tests prove clean-label training does not call it.
+Its docstring warns that it is not valid for Tier A training labels.
+```
+
+## 5.3 Fail closed
+
+Invalid state must fail closed.
+
+Required examples:
+
+```text
+Invalid World partition -> raise error, do not silently repair.
+Missing full hidden-zone assignment -> raise error in clean-label path.
+Hand-only belief evaluator passed to full ISMCTS -> raise error.
+Unseeded full-ISMCTS world -> raise error.
+Attempt to use run_belief for clean-label training -> raise error.
+Engine returned world differs from requested World -> raise error.
+```
+
+## 5.4 No silent fallback
+
+You must remove or guard silent fallbacks that hide correctness failures.
+
+Forbidden patterns:
+
+```python
+try:
+    critical_correctness_operation()
+except Exception:
+    pass
+```
+
+```python
+if invalid_world:
+    world = World()
+```
+
+```python
+if exact_action_failed:
+    execute_some_other_action()
+```
+
+```ts
+const rng = seed ? seededRng(seed) : Math.random;
+```
+
+```python
+if tests_fail:
+    relax_assertion()
+```
+
+---
+
+# 6. Required test standards
+
+Every meaningful fix must include tests that prove:
+
+```text
+The old bug would fail.
+The new behavior passes.
+The runtime path uses the new behavior.
+The implementation fails closed on invalid inputs.
+The implementation does not leak hidden information.
+The implementation remains reproducible when seeded.
+```
+
+## 6.1 Test categories required when applicable
+
+For each remediation phase, You must include at least one test from each applicable category:
+
+```text
+Unit test:
+  Pure helper/math/projection behavior.
+
+Contract test:
+  API shape, required fields, fail-closed behavior.
+
+Runtime integration test:
+  Real path used by training/search/engine bridge.
+
+Regression test:
+  Reproduces the audited failure.
+
+Negative test:
+  Invalid or unsafe behavior raises instead of silently continuing.
+
+Reproducibility test:
+  Same seed produces same result when deterministic behavior is required.
+
+Anti-leak test:
+  Hidden opponent information does not affect actor-visible output.
+
+Anti-drift test:
+  Legacy path is unreachable from clean-label training.
+```
+
+## 6.2 Tests must not be performative
+
+A test is invalid if it only proves that code executed.
+
+Weak:
+
+```python
+assert res.pi.sum() > 0
+assert transposition_hits > 0
+assert len(worlds) > 0
+```
+
+Strong:
+
+```python
+assert requested_inkwell_ids == actual_inkwell_ids
+assert root_history_len < leaf_history_len
+assert returned_root_visit_sum > 0
+assert two_visible_target_differences_produce_different_keys
+assert two_hidden_opponent_ink_identity_differences_produce_same_observer_key
+assert clean_label_training_did_not_call_run_belief
+```
+
+## 6.3 No unjustified skips
+
+A skip is allowed only when the condition is unavoidable and specific.
+
+Allowed:
+
+```python
+if obs["done"]:
+    pytest.skip("game ended before required midgame state")
+```
+
+Forbidden:
+
+```python
+pytest.skip("flaky")
+pytest.skip("not implemented")
+pytest.skip("engine issue")
+pytest.mark.xfail
+```
+
+Any `xfail`, broad skip, or test weakening must be treated as incomplete remediation unless explicitly approved.
+
+---
+
+# 7. Required audit after implementation
+
+After making changes, You must perform a self-audit before claiming completion.
+
+The audit must include:
+
+```text
+1. Search for forbidden legacy calls.
+2. Search for hand-only belief usage.
+3. Search for unseeded randomness in search/determinization paths.
+4. Search for Math.random in full-ISMCTS paths.
+5. Search for broad exception swallowing.
+6. Search for new or existing TODO/FIXME near touched logic.
+7. Search for skipped/xfail tests.
+8. Search for tests that assert only shape/execution without semantic correctness.
+9. Confirm no native GameEngine source was modified.
+10. Confirm all required new tests were added.
+```
+
+Suggested commands:
+
+```bash
+grep -R "BeliefEvaluator" -n lorcana-bot/search lorcana-bot/training lorcana-bot/tests
+grep -R "run_belief" -n lorcana-bot/search lorcana-bot/training lorcana-bot/tests
+grep -R "Math.random" -n lorcana-bot/engine/node_server lorcana-bot/search lorcana-bot/training
+grep -R "pytest.skip\|xfail\|pass  #\|except Exception" -n lorcana-bot/tests lorcana-bot/search lorcana-bot/training lorcana-bot/engine
+grep -R "TODO\|FIXME\|temporary\|legacy" -n lorcana-bot/search lorcana-bot/training lorcana-bot/engine lorcana-bot/tests
+git diff --name-only
+git diff --check
+```
+
+If these commands find concerning results, You must resolve them or explicitly list them as unresolved blockers.
+
+---
+
+# 8. Required verification commands
+
+You must run the baseline verification:
+
+```bash
+../lorcana-bot-venv/bin/python -m pytest -q
+git diff --check
+python -m compileall -q engine network search training tests
+```
+
+You must also run the Tier A-specific verification suite:
+
+```bash
+../lorcana-bot-venv/bin/python -m pytest -q \
+  tests/test_world_contract.py \
+  tests/test_engine_determinize_world.py \
+  tests/test_belief_tracker_full_world.py \
+  tests/test_structured_belief_wiring.py \
+  tests/test_clean_label_search_mode.py \
+  tests/test_engine_sim_full_world.py \
+  tests/test_infoset_perfect_recall.py \
+  tests/test_lane_local_history.py \
+  tests/test_observed_action_correction_runtime.py \
+  tests/test_infoset_diagnostics.py \
+  tests/test_reproducibility_tier_a.py \
+  tests/test_tier_a_runtime_regressions.py
+```
+
+If any file does not yet exist, You must create it when it is required by the remediation phase.
+
+A phase is not complete if its required test file does not exist.
+
+---
+
+# 9. Required final response format from the agent
+
+At the end of each implementation phase, You must report in this exact structure.
+
+```markdown
+# Phase completion report
+
+## Phase implemented
+
+- Phase:
+- Findings addressed:
+- Commit/branch:
+
+## Files changed
+
+- `path/to/file.py`
+  - What changed:
+  - Why it changed:
+  - Risk:
+
+## Legacy logic removed or quarantined
+
+- Legacy path:
+- Status:
+- Proof it is not used by clean-label training:
+
+## Tests added or updated
+
+- `tests/test_name.py::test_name`
+  - Proves:
+  - Would fail before this fix:
+
+## Verification commands run
+
+```bash
+<command>
+```
+
+Result:
+
+```text
+<exact result summary>
+```
+
+## Forbidden-pattern audit
+
+- Hand-only belief path checked:
+- PIMC clean-label path checked:
+- Unseeded randomness checked:
+- Math.random checked:
+- broad exception swallowing checked:
+- skipped/xfail tests checked:
+- native GameEngine modifications checked:
+
+## Remaining blockers
+
+- None
+
+or
+
+- Blocker:
+  - Why it remains:
+  - Required next action:
+```
+
+You must not replace this with a generic summary.
+
+---
+
+# 10. Required outstanding-work check
+
+Before ending any response, You must explicitly answer:
+
+```text
+Did I inspect every file/function that this phase depends on?
+Did I update every active caller?
+Did I remove or guard every obsolete legacy path?
+Did I add tests that would fail on the broken implementation?
+Did I run the required tests?
+Did I check for hidden fallbacks, skipped tests, and broad exception swallowing?
+Did I confirm no native GameEngine code was modified?
+Is there any remaining unverified behavior?
+```
+
+If any answer is not an unqualified yes, the phase is incomplete.
+
+---
+
+# 11. Strict definition of done
+
+A remediation item is done only when all are true:
+
+```text
+The flawed logic is removed or made unreachable.
+The replacement logic is implemented in the active runtime path.
+The replacement logic is covered by meaningful tests.
+The tests would fail on the previous flawed logic.
+The full verification command passes.
+The agent audited for forbidden patterns.
+The agent reports no unresolved blockers.
+```
+
+A remediation item is not done when:
+
+```text
+Only helper code was added.
+Only a test mock passes.
+Only existing tests pass.
+The old path remains reachable.
+The final behavior depends on caller discipline.
+The code silently falls back to unsafe behavior.
+The agent did not inspect downstream callers.
+The agent did not run verification.
+```
+
+---
+
+# 12. Tier A-specific forbidden drift list
+
+For Tier A belief-search correctness, these are strict blockers.
+
+```text
+BeliefEvaluator used in clean-label training.
+run_belief used in clean-label training.
+World.opponent_inkwell_ids ignored by engine simulation.
+World.opponent_deck_ids ignored by engine simulation.
+World.self_deck_ids ignored when supplied.
+sample_worlds() returns empty default Worlds for non-empty hidden pools.
+rho stored as rebased value while documented as raw b/q.
+Structured uniform proposal forces rho == 1.
+BeliefTracker stores only hand sets.
+BeliefTracker.sample_world() returns hand-only Worlds.
+BeliefTracker applies included-only posterior reweighting.
+observe_opponent_action() exists but is not called during real self-play.
+action_updates remains zero after real opponent actions.
+info_set_key includes obs["hidden"] identities.
+history_event truncates visible action identity.
+Actor’s own ink/mulligan identity is redacted from actor.
+Opponent hidden ink/mulligan identity is visible to observer.
+stepExact mutates server public history.
+Neural leaf obs receives stale root history only.
+run_infoset returns empty legacy diagnostic root.
+DecisionTracer reports zero visits for populated full ISMCTS.
+Tracker worlds lack seeds.
+TypeScript full-ISMCTS determinization can fall back to Math.random.
+Root-invariance tests omit opponent inkwell.
+Runtime tests do not exercise the real bridge/server path.
+```
+
+Any one of these means development is incomplete.
+
+---
+
+# 13. Pull request merge contract
+
+A remediation/implementation must not be finalized unless the description includes:
+
+```text
+1. Phase(s) implemented.
+2. Findings closed.
+3. Files changed.
+4. Tests added.
+5. Verification commands and results.
+6. Forbidden-pattern audit results.
+7. Confirmation that no native TheCardGoats GameEngine source was modified.
+8. Remaining blockers, if any.
+```
+
+A remediation/implementation must be rejected if:
+
+```text
+It weakens tests.
+It skips failing tests without justification.
+It changes native GameEngine code.
+It leaves legacy clean-label paths reachable.
+It does not include tests for the remediated behavior.
+It claims completion without command output.
+It introduces broad silent fallback behavior.
+```

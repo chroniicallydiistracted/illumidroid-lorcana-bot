@@ -345,6 +345,14 @@ function shallowProtect(s: any): any {
 const HIST_MAX = 48;   // rolling window of recent PUBLIC events (§2.3)
 const CANON = [CANONICAL_PLAYER_ONE, CANONICAL_PLAYER_TWO];
 
+// Finding #4 — benign per-card meta a genuinely hidden hand/deck/inkwell card may carry
+// (observed across real games: state/damage/publicFaceState/isDrying/revealed). Any key
+// OUTSIDE this set on a card being MOVED into a hidden zone is play-context state (location,
+// shift stacks, temporary grants, …) and is rejected fail-closed rather than normalized away.
+const HIDDEN_ZONE_META_ALLOW = new Set<string>([
+  "state", "damage", "isDrying", "publicFaceState", "revealed",
+]);
+
 class Session {
   engine: AnyEngine;
   seed: string;
@@ -446,6 +454,403 @@ class Session {
 
     this.engine.loadState(clone);
     return true;
+  }
+
+  /** Deterministic Fisher-Yates from a string seed (NO ambient randomness), PINNING the
+   *  positions whose knowledge is protected: a pinned index keeps its current card, and only
+   *  the remaining FREE positions are permuted among themselves. Used for the self-deck order
+   *  when no explicit order is supplied — so a scryed / statically-revealed / live-referenced
+   *  self-deck card keeps its known position instead of being shuffled away. */
+  private seededShufflePinned(arr: string[], seed: string, pinned: Set<number>): string[] {
+    let h = 0;
+    for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+    const rng = () => ((h = (h * 1103515245 + 12345) >>> 0) / 0x100000000);
+    const out = [...arr];
+    const free: number[] = [];
+    for (let i = 0; i < arr.length; i++) if (!pinned.has(i)) free.push(i);
+    // Fisher-Yates over the FREE slots only (their cards), leaving pinned slots untouched.
+    for (let k = free.length - 1; k > 0; k--) {
+      const j = Math.floor(rng() * (k + 1));
+      const a = free[k], b = free[j];
+      [out[a], out[b]] = [out[b], out[a]];
+    }
+    return out;
+  }
+
+  /** Observer-aware PROTECTED-FACTS LEDGER (Findings #1, #2). For the FOUR repartitioned zones
+   *  (opponent hand/inkwell/deck + self deck) it computes the positions whose current card the
+   *  determinization MUST preserve EXACTLY (same id at the same index), because moving/reordering
+   *  it would either rewrite a fact the acting player legally knows or corrupt a live engine
+   *  reference. A position is pinned when its current card is:
+   *    (a) ACTOR-KNOWN — the card is non-hidden in the actor's own fog projection
+   *        (`getBoard(view)`), the engine's source of truth for reveal windows, scry, and
+   *        static top-deck visibility (`isCardVisibleViaReveal` / `isTopDeckCardVisibleViaStaticEffect`).
+   *        For the deck this preserves POSITIONAL knowledge (top/bottom), closing the "revealed
+   *        deck card slides from top to bottom while staying in the deck" gap.
+   *    (b) LIVE-REFERENCED — the card id appears anywhere in the live runtime game state `G`
+   *        (turn metadata, triggered-ability pending events / registrations / bag, replacement
+   *        registrations, continuous effects, pending action effects + continuations,
+   *        play-from-under permissions) OR as a cross-reference inside another card's `cardMeta`
+   *        (cardsUnder / stackParentId / atLocationId). Any such reference, classified or not, is
+   *        treated as a fact: the card is pinned. The sampler is not yet ledger-aware, so a world
+   *        that violates a pin is rejected fail-closed (the correct Phase-3 behavior). */
+  private collectProtectedFacts(clone: any, selfId: string, zoneKeys: string[]):
+      Record<string, Map<number, string>> {
+    const idUniverse = new Set<string>(Object.keys(clone.ctx.zones.private.cardIndex ?? {}));
+    const zc = clone.ctx.zones.private.zoneCards;
+    const meta = clone.ctx.zones.private.cardMeta ?? {};
+
+    // (b) live references: recursive scan of G (NOT the zone card lists, which live under ctx)
+    // plus cross-references inside cardMeta VALUES (never the owning key).
+    const liveRef = new Set<string>();
+    const scan = (v: any) => {
+      if (v == null) return;
+      if (typeof v === "string") { if (idUniverse.has(v)) liveRef.add(v); return; }
+      if (Array.isArray(v)) { for (const x of v) scan(x); return; }
+      if (typeof v === "object") { for (const k of Object.keys(v)) scan(v[k]); }
+    };
+    scan(clone.G);
+    for (const m of Object.values(meta) as any[]) {
+      for (const k of Object.keys(m ?? {})) scan(m[k]);   // values only — keys are owners, not refs
+    }
+
+    // (a) actor-known identities: cards non-hidden in the actor's fog projection.
+    const known = new Set<string>();
+    try {
+      const board: any = this.engine.getBoard(viewFor(selfId));
+      for (const c of Object.values(board.cards ?? {}) as any[]) {
+        if (c && c.hidden === false && typeof c.id === "string" && idUniverse.has(c.id)) known.add(c.id);
+      }
+    } catch { /* projection unavailable — fall back to live-ref + reveal-window pins only */ }
+
+    // (a, defense in depth) raw reveal-window membership, independent of the projection.
+    for (const rv of (clone.ctx.zones.reveals?.active ?? [])) {
+      for (const cid of (rv.cardIDs ?? [])) if (idUniverse.has(cid)) known.add(cid);
+    }
+
+    const pins: Record<string, Map<number, string>> = {};
+    for (const zk of zoneKeys) {
+      const m = new Map<number, string>();
+      const cur: string[] = zc[zk] ?? [];
+      for (let i = 0; i < cur.length; i++) {
+        const cid = cur[i];
+        if (liveRef.has(cid) || known.has(cid)) m.set(i, cid);
+      }
+      pins[zk] = m;
+    }
+    return pins;
+  }
+
+  /** Expose the protected-facts ledger for the CURRENT actor (diagnostic / test / future
+   *  sampler use). Returns, per repartitioned zone, the pinned `[{index,id}]` whose identity (and
+   *  for the deck, position) the determinization must preserve, plus the flat `pinnedIds` union.
+   *  The sampler will consume this to PROPOSE only ledger-respecting worlds; until then the
+   *  server rejects violations fail-closed. */
+  protectedFacts(): {
+    self: string | null; pins: Record<string, { index: number; id: string }[]>; pinnedIds: string[];
+  } {
+    const actor = this.currentActor();
+    if (!actor) return { self: null, pins: {}, pinnedIds: [] };
+    const oppId = actor === CANONICAL_PLAYER_ONE ? CANONICAL_PLAYER_TWO : CANONICAL_PLAYER_ONE;
+    const clone: any = structuredClone(this.engine.getAuthoritativeState());
+    const zoneKeys = [`hand:${oppId}`, `inkwell:${oppId}`, `deck:${oppId}`, `deck:${actor}`];
+    const raw = this.collectProtectedFacts(clone, actor, zoneKeys);
+    const pins: Record<string, { index: number; id: string }[]> = {};
+    const union = new Set<string>();
+    for (const zk of zoneKeys) {
+      pins[zk] = [...raw[zk].entries()].map(([index, id]) => ({ index, id }));
+      for (const { id } of pins[zk]) union.add(id);
+    }
+    return { self: actor, pins, pinnedIds: [...union] };
+  }
+
+  /** Validate that a REWRITTEN clone is internally consistent BEFORE it is committed via
+   *  `loadState` (Finding #6 — staged validation). Recomputes the agreement invariants the
+   *  ENGINE ACTUALLY MAINTAINS: every card listed in a `zoneCards` lane has a `cardIndex` entry
+   *  pointing to THAT lane with a string owner/controller, and no instance appears in two lanes.
+   *  (The engine does NOT keep `cardIndex.index` position-synced — a clean baseline already has
+   *  ~100 positional offsets — so positional index is intentionally NOT asserted here; the
+   *  repartitioned lanes are re-indexed positionally by `reindexZone` regardless.) Throws on any
+   *  violation; the caller never loads a failed clone, so the live engine state is preserved. */
+  private validateCloneConsistency(clone: any): void {
+    const zc = clone.ctx.zones.private.zoneCards;
+    const idx = clone.ctx.zones.private.cardIndex;
+    const seen = new Set<string>();
+    for (const [zoneKey, ids] of Object.entries(zc) as [string, string[]][]) {
+      for (const cardId of ids) {
+        if (seen.has(cardId)) throw new Error(`determinize_world: clone has ${cardId} in two zones`);
+        seen.add(cardId);
+        const e = idx[cardId];
+        if (!e || e.zoneKey !== zoneKey) {
+          throw new Error(`determinize_world: clone cardIndex disagrees for ${cardId} (in ${zoneKey}, indexed at ${e?.zoneKey ?? "<none>"})`);
+        }
+        if (typeof e.ownerID !== "string" || typeof e.controllerID !== "string") {
+          throw new Error(`determinize_world: clone cardIndex missing owner/controller for ${cardId}`);
+        }
+      }
+    }
+  }
+
+  /** Reconcile the THREE parallel engine structures after a raw hidden-zone repartition,
+   *  exactly as the native fixture loader maintains them together (`applyFixtureState`): the
+   *  ordered `zoneCards`, the per-card location `cardIndex` (zoneKey + positional index +
+   *  owner/controller), and the per-card `cardMeta`. Without this, `moveCard()` resolves a
+   *  card via its STALE `cardIndex.zoneKey` and corrupts state (an instance in two zones).
+   *
+   *  STRICT-ADMISSION + ZONE-TRANSITION METADATA CONTRACT (fail-closed; no guessing):
+   *   - Finding #5: every reindexed card MUST already have a `cardIndex` entry carrying a
+   *     string `ownerID` AND `controllerID`. A missing entry/owner/controller is malformed
+   *     authoritative state and THROWS (no `?? {}`, no fabricated fallback ownership).
+   *     owner/controller are PRESERVED from the card's own entry (native zone-operations.ts:212
+   *     keeps them across movement), never derived from the destination zone.
+   *   - Finding #4: a card that MOVES into this hidden zone (its current `cardIndex.zoneKey`
+   *     differs) may only carry the benign hidden-zone meta allowlist; any play-context special
+   *     meta (`atLocationId`, `cardsUnder`, `stackParentId`, `temporaryKeywords`, a face-UP
+   *     overlay, …) THROWS rather than being silently normalized. A moved card is rebuilt with
+   *     clean hidden-zone meta (inkwell: slot-wise public ready/exerted + faceDown; hand/deck:
+   *     ready). A card that STAYS in its zone keeps its own meta unchanged (index only).
+   *  Does NOT touch public zone summaries (Finding #5 / F5): a hidden-only repartition
+   *  preserves the public counts, so the summary (count + revision) must stay byte-identical. */
+  private reindexZone(clone: any, zoneKey: string, newIds: string[], inkSlotStates?: (string | undefined)[]): void {
+    const zc = clone.ctx.zones.private.zoneCards;
+    const idx = clone.ctx.zones.private.cardIndex;
+    const meta = clone.ctx.zones.private.cardMeta;
+    const isInk = zoneKey.startsWith("inkwell:");
+    zc[zoneKey] = [...newIds];
+    for (let i = 0; i < newIds.length; i++) {
+      const cardId = newIds[i];
+      const prev = idx[cardId];
+      // Finding #5: strict admission — reject malformed authoritative state, do not invent it.
+      if (!prev || typeof prev.ownerID !== "string" || typeof prev.controllerID !== "string") {
+        throw new Error(`determinize_world: card ${cardId} has no/invalid cardIndex owner/controller (malformed state)`);
+      }
+      const moving = prev.zoneKey !== zoneKey;
+      idx[cardId] = { zoneKey, index: i, ownerID: prev.ownerID, controllerID: prev.controllerID };
+      if (!moving) continue;                                // staying card: keep its meta, index already set
+      // Finding #4: zone-transition metadata contract for a MOVED card — reject unsupported
+      // special meta instead of guessing.
+      const own = meta[cardId] ?? {};
+      for (const k of Object.keys(own)) {
+        if (!HIDDEN_ZONE_META_ALLOW.has(k)) {
+          throw new Error(`determinize_world: card ${cardId} carries unsupported meta '${k}' for hidden-zone transition into ${zoneKey}`);
+        }
+      }
+      if (own.publicFaceState === "faceUp") {
+        throw new Error(`determinize_world: card ${cardId} is face-up (known) and cannot be moved into hidden ${zoneKey}`);
+      }
+      // rebuild clean hidden-zone meta (a freshly placed hidden card has no damage / drying /
+      // reveal state); inkwell preserves the public ready/exerted COUNT slot-wise + faceDown.
+      meta[cardId] = isInk
+        ? { state: (inkSlotStates && inkSlotStates[i]) ?? "ready", publicFaceState: "faceDown" }
+        : { state: "ready" };
+    }
+  }
+
+  /** Tier-A Phase 3 — full-`World` determinization (CLEAN-LABEL capable). Unlike the
+   *  diagnostic hand-only `determinize`, this HONORS the sampled World's EXACT opponent
+   *  hand / inkwell / deck partition and (when supplied) the EXACT self-deck order, with NO
+   *  ambient randomness. It validates the spec against the authoritative hidden pool and
+   *  FAILS CLOSED (throws) on any violation rather than silently repairing:
+   *    - `selfId` must be one of the two canonical seats;
+   *    - `world.seed` must be a non-empty (trimmed) string — for EVERY call;
+   *    - every id must be a non-empty string;
+   *    - each requested opponent zone count must equal the public zone size;
+   *    - no id may repeat across the three opponent zones;
+   *    - the requested opponent partition must conserve the authoritative hidden pool exactly;
+   *    - a supplied selfDeckIds must be a count-correct, duplicate-free permutation of the
+   *      authoritative self deck (conservation);
+   *    - the world must reproduce EVERY protected fact (`collectProtectedFacts`): each position
+   *      whose current card is actor-known (reveal / scry / static top-deck, from the engine's
+   *      own fog projection) or live-referenced (anywhere in `G` or a `cardMeta` cross-ref) must
+   *      keep that exact id at that exact index — across ALL four repartitioned zones, decks
+   *      positionally. This closes the "revealed deck card slides off top" and "ignores the
+   *      acting player's self deck" gaps and rejects worlds that would break a live reference.
+   *  Validation runs ENTIRELY before any mutation, and the rewritten clone is re-validated
+   *  (`validateCloneConsistency`) before `loadState`, so a rejected request leaves the live
+   *  engine state unchanged. After repartition it reconciles `cardIndex` + `cardMeta`
+   *  (`reindexZone`). When selfDeckIds is omitted the self deck order is shuffled
+   *  DETERMINISTICALLY from `world.seed`, PINNING protected positions in place. Returns the
+   *  REALIZED post-load partition. */
+  determinizeWorld(selfId: string, world: any): {
+    opponentHandIds: string[]; opponentInkwellIds: string[];
+    opponentDeckIds: string[]; selfDeckIds: string[];
+  } {
+    // --- fail-closed admission checks (before cloning or mutating anything) ---
+    if (selfId !== CANONICAL_PLAYER_ONE && selfId !== CANONICAL_PLAYER_TWO) {
+      throw new Error(`determinize_world: invalid seat ${JSON.stringify(selfId)}`);
+    }
+    // F6: a determinization is only valid from the CURRENT actor's information set; reject any
+    // other (even otherwise-canonical) seat so a caller can't mutate the wrong perspective.
+    const actor = this.currentActor();
+    if (selfId !== actor) {
+      throw new Error(`determinize_world: selfId ${JSON.stringify(selfId)} is not the current actor ${JSON.stringify(actor)}`);
+    }
+    if (typeof world.seed !== "string" || world.seed.trim().length === 0) {
+      throw new Error("determinize_world: world.seed must be a non-empty string");
+    }
+    const asIds = (v: unknown, label: string): string[] => {
+      if (!Array.isArray(v)) throw new Error(`determinize_world: ${label} must be an array`);
+      return v.map((x) => {
+        if (typeof x !== "string" || x.length === 0) {
+          throw new Error(`determinize_world: ${label} has a non-string/empty id ${JSON.stringify(x)}`);
+        }
+        return x;
+      });
+    };
+
+    const oppId = selfId === CANONICAL_PLAYER_ONE ? CANONICAL_PLAYER_TWO : CANONICAL_PLAYER_ONE;
+    const clone: any = structuredClone(this.engine.getAuthoritativeState());
+    const zc = clone.ctx.zones.private.zoneCards;
+    const meta = clone.ctx.zones.private.cardMeta;
+
+    const oHand = `hand:${oppId}`, oInk = `inkwell:${oppId}`, oDeck = `deck:${oppId}`;
+    const curHand: string[] = zc[oHand] ?? [], curInk: string[] = zc[oInk] ?? [], curDeck: string[] = zc[oDeck] ?? [];
+    const reqHand = asIds(world.opponentHandIds, "opponentHandIds");
+    const reqInk = asIds(world.opponentInkwellIds, "opponentInkwellIds");
+    const reqDeck = asIds(world.opponentDeckIds, "opponentDeckIds");
+
+    // (1) per-zone counts must match the public zone sizes (the actor knows the counts)
+    if (reqHand.length !== curHand.length) throw new Error(`determinize_world: opponent hand count ${reqHand.length} != ${curHand.length}`);
+    if (reqInk.length !== curInk.length) throw new Error(`determinize_world: opponent inkwell count ${reqInk.length} != ${curInk.length}`);
+    if (reqDeck.length !== curDeck.length) throw new Error(`determinize_world: opponent deck count ${reqDeck.length} != ${curDeck.length}`);
+    // (2) no duplicate id across the three requested opponent zones
+    const all = [...reqHand, ...reqInk, ...reqDeck];
+    if (new Set(all).size !== all.length) throw new Error("determinize_world: duplicate id across opponent hand/inkwell/deck");
+    // (3) the requested partition must conserve the authoritative hidden pool EXACTLY
+    const pool = new Set<string>([...curHand, ...curInk, ...curDeck]);
+    if (all.length !== pool.size || all.some((id) => !pool.has(id))) {
+      throw new Error("determinize_world: requested opponent partition is not the authoritative hidden pool");
+    }
+
+    const sDeck = `deck:${selfId}`;
+    const curSelf: string[] = zc[sDeck] ?? [];
+
+    // ---- Findings #1 + #2: observer-aware protected-facts ledger ----
+    // Compute, for every repartitioned zone, the positions whose current card is actor-known
+    // (reveal window / scry / static top-deck) OR live-referenced anywhere in `G`/`cardMeta`.
+    // The requested world must reproduce each pinned (zone,index)->id EXACTLY; otherwise it
+    // rewrites a known fact or breaks a live reference -> reject fail-closed.
+    const pins = this.collectProtectedFacts(clone, selfId, [oHand, oInk, oDeck, sDeck]);
+    const enforcePins = (zoneKey: string, req: string[]) => {
+      for (const [i, id] of pins[zoneKey]) {
+        if (req[i] !== id) {
+          throw new Error(`determinize_world: world violates a protected fact in ${zoneKey} at slot ${i} (expected ${id}, got ${req[i] ?? "<none>"})`);
+        }
+      }
+    };
+    enforcePins(oHand, reqHand);
+    enforcePins(oInk, reqInk);
+    enforcePins(oDeck, reqDeck);
+
+    // ---- self deck: honor a supplied order (pins enforced), else seeded shuffle pinning the
+    //      protected (scryed / statically-revealed / live-referenced) positions in place ----
+    let newSelf: string[];
+    if (world.selfDeckIds !== null && world.selfDeckIds !== undefined) {
+      const reqSelf = asIds(world.selfDeckIds, "selfDeckIds");
+      if (reqSelf.length !== curSelf.length) throw new Error(`determinize_world: self deck count ${reqSelf.length} != ${curSelf.length}`);
+      if (new Set(reqSelf).size !== reqSelf.length) throw new Error("determinize_world: duplicate id in selfDeckIds");
+      const selfPool = new Set<string>(curSelf);
+      if (reqSelf.some((id) => !selfPool.has(id))) {
+        throw new Error("determinize_world: selfDeckIds is not a permutation of the authoritative self deck (conservation failure)");
+      }
+      enforcePins(sDeck, reqSelf);
+      newSelf = [...reqSelf];
+    } else {
+      newSelf = this.seededShufflePinned([...curSelf], world.seed, new Set(pins[sDeck].keys()));
+    }
+
+    // ---- ALL admission checks passed: now mutate (cardIndex + cardMeta reconciled per zone) ----
+    // capture ONLY the public inkwell ready/exerted state per slot (an allowlisted scalar) so
+    // the public available-ink count is preserved without transferring any identity's meta.
+    const oldInkStates = curInk.map((id) => meta[id]?.state as string | undefined);
+    this.reindexZone(clone, oHand, reqHand);
+    this.reindexZone(clone, oInk, reqInk, oldInkStates);
+    this.reindexZone(clone, oDeck, reqDeck);
+    this.reindexZone(clone, sDeck, newSelf);
+
+    // Finding #6: validate the rewritten clone BEFORE committing it. On any inconsistency we
+    // throw here, having never called loadState — so the live engine state is left intact.
+    this.validateCloneConsistency(clone);
+    this.engine.loadState(clone);
+    // realized post-load partition (strongest verification — what the engine actually holds)
+    const after: any = this.engine.getAuthoritativeState();
+    const z2 = after.ctx.zones.private.zoneCards;
+    return {
+      opponentHandIds: [...(z2[oHand] ?? [])],
+      opponentInkwellIds: [...(z2[oInk] ?? [])],
+      opponentDeckIds: [...(z2[oDeck] ?? [])],
+      selfDeckIds: [...(z2[sDeck] ?? [])],
+    };
+  }
+
+  /** Diagnostic state-integrity check (Phase 3 tests): proves the three parallel zone
+   *  structures agree after a determinization — every card in a `zoneCards` list has a
+   *  `cardIndex` entry pointing to THAT zone at THAT index with intact owner/controller (no
+   *  stale location, no corruption) and no instance appears in two zones (no duplication). Also
+   *  reports per-inkwell-zone READY counts (public available-ink preservation), the public zone
+   *  summaries (count+revision — must be unchanged by a hidden repartition), the reverse-index
+   *  orphan count, and the structured reveal windows (id + zone + index) so a test can assert
+   *  positional reveal facts survive. Finding #7: `badOwner` now also flags a corrupted
+   *  `controllerID`, and `revealedIds` carries each card's current zone + index. */
+  checkConsistency(): {
+    indexMismatches: number; multiZone: number; total: number; posMismatches: number;
+    badOwner: number; orphanIndex: number; inkReady: Record<string, number>;
+    summaries: Record<string, { count: number; revision: number }>;
+    revealedIds: { id: string; zoneKey: string | null; index: number | null }[];
+  } {
+    const st: any = this.engine.getAuthoritativeState();
+    const zc = st.ctx.zones.private.zoneCards;
+    const idx = st.ctx.zones.private.cardIndex;
+    const meta = st.ctx.zones.private.cardMeta;
+    const sum = st.ctx.zones.public.zoneSummaries ?? {};
+    const seen = new Set<string>();
+    let indexMismatches = 0, multiZone = 0, total = 0, posMismatches = 0, badOwner = 0;
+    const inkReady: Record<string, number> = {};
+    for (const [zoneKey, ids] of Object.entries(zc) as [string, string[]][]) {
+      const ownerScoped = /^(hand|deck|inkwell):/.test(zoneKey);
+      const zonePlayer = zoneKey.slice(zoneKey.indexOf(":") + 1);
+      let ready = 0;
+      for (let i = 0; i < ids.length; i++) {
+        const cardId = ids[i];
+        total++;
+        if (seen.has(cardId)) multiZone++;
+        else seen.add(cardId);
+        const e = idx[cardId];
+        if (!e || e.zoneKey !== zoneKey) {
+          indexMismatches++;
+        } else {
+          if (e.index !== i) posMismatches++;                          // F7: positional index drift
+          // F4/F7: owner OR controller corruption in a private zone. A hidden card's owner must
+          // be the zone's player; its controller must equal its owner (no foreign control while
+          // hidden) — a moved card that kept a stale in-play controller would be flagged here.
+          if (ownerScoped && (e.ownerID !== zonePlayer || e.controllerID !== zonePlayer)) badOwner++;
+        }
+        if (zoneKey.startsWith("inkwell:") && meta[cardId]?.state === "ready") ready++;
+      }
+      if (zoneKey.startsWith("inkwell:")) inkReady[zoneKey] = ready;
+    }
+    // F7: reverse-index orphans — a cardIndex entry whose zone does not actually contain it
+    let orphanIndex = 0;
+    for (const [cardId, e] of Object.entries(idx) as [string, any][]) {
+      const z = zc[e.zoneKey];
+      if (!z || !z.includes(cardId)) orphanIndex++;
+    }
+    // F5/F7: public zone summaries (count + revision) — a hidden-only repartition must leave
+    // these byte-for-byte unchanged; a caller can diff before/after.
+    const summaries: Record<string, { count: number; revision: number }> = {};
+    for (const [zoneKey, s] of Object.entries(sum) as [string, any][]) {
+      summaries[zoneKey] = { count: s?.count ?? 0, revision: s?.revision ?? 0 };
+    }
+    // F7: structured reveal windows — id + current zone + index so a test can assert a revealed
+    // card kept its exact position (positional reveal knowledge), not just its zone membership.
+    const revealedIds: { id: string; zoneKey: string | null; index: number | null }[] = [];
+    for (const rv of (st.ctx.zones.reveals?.active ?? [])) {
+      for (const cid of (rv.cardIDs ?? [])) {
+        const e = idx[cid];
+        revealedIds.push({ id: cid, zoneKey: e?.zoneKey ?? null, index: typeof e?.index === "number" ? e.index : null });
+      }
+    }
+    return { indexMismatches, multiZone, total, posMismatches, badOwner, orphanIndex, inkReady, summaries, revealedIds };
   }
 
   /** O(1) snapshot: the engine state is immutable (Mutative structural sharing),
@@ -633,7 +1038,36 @@ class Session {
     };
 
     const cards: any[] = [];
+    const oppSlotSeq: Record<string, number> = {};
     for (const c of Object.values(board.cards) as any[]) {
+      // Finding #3: an OPPONENT hidden-zone card must NOT leak its identity into the
+      // actor-visible obs["cards"]. The fog projection still tags hidden inkwell/limbo rows
+      // with the RAW instance id (project-board.ts buildHiddenCard returns `rawCardId` as `id`,
+      // and derives real stats for it), so redact every opponent-owned hidden card to a STABLE
+      // slot placeholder carrying only public-allowlisted structure. The real ids remain solely
+      // in obs["hidden"] (oppHidden), the privileged witness for the search-only determinization
+      // sampler — never the trunk / info-set key. The actor's OWN hidden cards are NOT redacted
+      // (the actor legally knows its own inkwell/mulligan identities).
+      if (Boolean(c.hidden) && c.ownerId !== selfId) {
+        const slot = typeof c.zoneIndex === "number"
+          ? c.zoneIndex
+          : ((oppSlotSeq[c.zone] = (oppSlotSeq[c.zone] ?? 0) + 1) - 1);
+        // Null ONLY the identity-bearing fields (id / definition / name / printed stats /
+        // keywords). PUBLIC physical state stays — opponent spent (exerted) ink and any damage
+        // counters are public knowledge, so preserving them does not leak the card's identity.
+        cards.push({
+          id: `oppslot:${c.zone}:${slot}`,
+          owner: 1, zone: c.zone, cardType: "unknown",
+          cost: 0, strength: 0, willpower: 0, lore: 0,
+          damage: c.damage ?? 0,
+          exerted: Boolean(c.exerted),
+          drying: Boolean(c.drying),
+          ready: !c.exerted,
+          keywords: [],
+          definitionId: null, name: null, hidden: true,
+        });
+        continue;
+      }
       cards.push({
         id: c.id,
         owner: c.ownerId === selfId ? 0 : 1,
@@ -781,6 +1215,23 @@ function handle(req: any): any {
       const handIds: string[] = Array.isArray(req.handInstanceIds) ? req.handInstanceIds : [];
       session.determinize(self, handIds, req.seed ? String(req.seed) : undefined);
       return { ok: true, obs: session.observe() };
+    }
+    // Tier-A Phase 3: full-`World` determinization (clean-label capable). Honors the exact
+    // opponent hand/inkwell/deck partition + optional self-deck order with NO ambient
+    // randomness; throws (-> ok:false) on any invalid spec; returns the realized partition.
+    case "determinize_world": {
+      if (!session) return { ok: false, error: "no session" };
+      const self = String(req.self);
+      const realized = session.determinizeWorld(self, req.world ?? {});
+      return { ok: true, obs: session.observe(), realized };
+    }
+    case "check_consistency": {
+      if (!session) return { ok: false, error: "no session" };
+      return { ok: true, consistency: session.checkConsistency() };
+    }
+    case "protected_facts": {
+      if (!session) return { ok: false, error: "no session" };
+      return { ok: true, protectedFacts: session.protectedFacts() };
     }
     case "run_paths": {
       if (!session) return { ok: false, error: "no session" };

@@ -29,9 +29,15 @@ Current audited checkpoint:
 
 ```text
 Phase 0   complete — belief-guided clean-label training fails closed
-Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Phase 13  baseline installed — 5 passing probes (2 Phase-1 + 3 Phase-2) + 15 strict expected-red probes
 Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
-Next      Phase 2 structured sampler math
+Phase 2   complete — audited GO for exact structured sampling + importance semantics
+Phase 3   IN REMEDIATION (NO-GO) — full-`World` RPC built + bounded findings fixed (cardIndex/
+          cardMeta reconcile, owner/controller preserve, summary invariance, seat==currentActor,
+          exact-order agreement, metadata allowlist); protected-facts ledger PARTIAL (reveals
+          guarded; static top-deck/pending-effect-refs/§15 open) + obs hidden-ID sanitization (F3)
+          unresolved
+Next      close Phase 3 blockers before Phase 7
 ```
 
 Phase 1 now provides a strict `World.validate_against_obs()` contract and a shared
@@ -40,6 +46,13 @@ rejects missing or malformed zones, non-integer counters, non-string or empty ID
 duplicate IDs, and hidden-zone cardinalities that disagree with public counts.
 `World.seed` is enforced as a non-empty string for clean-label admission.
 Belief-guided clean-label training remains blocked while the downstream phases land.
+
+Phase 2 closes audit finding 6 at the sampler boundary. `sample_worlds()` now uses
+log-domain exact dynamic programs for the count-conditioned hand target and the
+structured hand/inkwell/deck target; stores raw `rho = b/q` separately from normalized
+pooling `weight`; keeps structured mode active when `ink_count == 0`; includes the
+residual uniform inkwell-partition factor in full-world audit logs; and rejects malformed
+proposal modes, pools, probability vectors, counts, and supplied base seeds fail-closed.
 
 ### Historical partial implementation snapshot
 
@@ -70,8 +83,8 @@ leak-free in Python from the filtered obs (server-side key + per-observer histor
 **Audit result at remediation start**
 Tier A was not complete end-to-end. The isolated algorithms were promising and
 64 tests passed at that snapshot, but active training paths still produced
-contaminated or incomplete search labels. Phase 0, Phase 13 baseline setup, and
-Phase 1 have since landed; the unresolved downstream findings remain sequenced in
+contaminated or incomplete search labels. Phase 0, Phase 13 baseline setup, Phase 1,
+and Phase 2 have since landed; the unresolved downstream findings remain sequenced in
 the authoritative remediation plan.
 
 **Findings**
@@ -90,11 +103,16 @@ the authoritative remediation plan.
 5. **High: the Python key is not a full perfect-recall key.**  
 [EngineSimulator](/home/andre/illumidroid-lorcana-bot/lorcana-bot/search/engine_sim.py:47) stores only the first two colon-separated action-key fields. This drops targets, choices, costs, destinations, and mulligan selections encoded by [candidateKey()](/home/andre/illumidroid-lorcana-bot/lorcana-bot/engine/node_server/server.ts:171). [history_event()](/home/andre/illumidroid-lorcana-bot/lorcana-bot/search/infoset.py:54) also redacts inking for the acting player, who knows their own inked card. The deferred per-observer history work is required for the report’s perfect-recall claim.
 
-6. **Medium: structured sampler edge cases violate its public contract.**  
-[sample_worlds()](/home/andre/illumidroid-lorcana-bot/lorcana-bot/search/determinize.py:201) has three defects:
+6. **Medium: structured sampler edge cases violated its public contract — REMEDIATED IN PHASE 2.**
+[sample_worlds()](/home/andre/illumidroid-lorcana-bot/lorcana-bot/search/determinize.py:461) previously had three defects:
 - Structured `proposal="uniform"` still sets `log_target == log_proposal`, so every `rho` is `1`.
 - A zero-card hand returns empty worlds, dropping inkwell and deck assignments.
-- `rho` is documented as raw `b/q`, but [rebased before storage](/home/andre/illumidroid-lorcana-bot/lorcana-bot/search/determinize.py:251).
+- `rho` was documented as raw `b/q`, but rebased before storage.
+
+Phase 2 additionally hardened the exactness boundary discovered during re-review:
+both DPs are log-domain, structured `ink_count == 0` worlds still use the deck channel,
+unstructured residual zone factors remain in both audit logs, and malformed sampler
+inputs reject instead of being silently repaired.
 
 7. **Medium: persistent reweighting is not a valid conditional-Bernoulli update.**  
 [BeliefTracker.worlds()](/home/andre/illumidroid-lorcana-bot/lorcana-bot/search/belief_filter.py:146) multiplies only included-card probabilities. It omits excluded-card `(1-p)` terms and repeatedly treats the current posterior-like prediction as new evidence. This needs a defined likelihood model or removal.
@@ -112,9 +130,9 @@ The root-invariance test samples only hand + deck in [test_search_belief.py](/ho
 The exact conditional-Bernoulli sampler works in its tested path. Per-seat trackers are instantiated correctly. The shared `InfoSetTable`, action-ID alignment, invalid-path quarantine, and synthetic strategy-fusion fixture are real improvements.
 
 **Verification**
-Latest Phase-1 GO verification:
+Latest Phase-2 GO verification:
 ```text
-../lorcana-bot-venv/bin/python -m pytest -q   # 111 passed / 18 xfailed (129 collected)
+../lorcana-bot-venv/bin/python -m pytest -q   # 134 passed / 15 xfailed (149 collected)
 git diff --check
 python -m compileall -q engine network search training tests
 ```
