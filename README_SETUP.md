@@ -60,8 +60,8 @@ chmod +x scripts/agent/*.sh scripts/agent/*.py
 Search and replace:
 
 ```text
-YOUR_GITHUB_HANDLE
-REPO_ROOT
+chroniicallydiistracted
+/home/andre/illumidroid-lorcana-bot
 ```
 
 Files requiring review:
