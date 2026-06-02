@@ -1,5 +1,24 @@
 # illumidroid-lorcana-bot Current-State Findings and High-Value Fix Backlog
 
+## Tier-A Remediation Override
+
+This backlog predates the strict Tier-A release audit. For belief-search
+correctness, `tier-a-belief-search-remediation-plan.md` is authoritative and
+supersedes older “current” descriptions below where they conflict.
+
+Audited checkpoint:
+
+```text
+Phase 0   complete — belief-guided clean-label sample writing fails closed
+Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
+Next      Phase 2 structured sampler math
+```
+
+Clean-label belief-guided training remains blocked. Legacy root-pooled PIMC is
+diagnostic-only as `run_pimc_diagnostic()`. The sections below remain useful as
+historical backlog rationale, but they are not an activation checklist.
+
 ## Executive Summary
 
 The current illumidroid build is substantially stronger than our earlier snapshot.
@@ -119,7 +138,9 @@ This is a strong Lorcana-specific improvement because face-down ink choices are 
 
 ### 6. Stable-key belief pooling
 
-Current `run_belief()` pools root statistics by exact stable key instead of assuming action-index alignment.
+The legacy root-pooled PIMC implementation pools root statistics by exact stable
+key instead of assuming action-index alignment. It is now quarantined as
+`run_pimc_diagnostic()` and cannot produce clean-label belief-training samples.
 
 Primary file:
 
@@ -129,7 +150,10 @@ This fixes a major correctness risk where determinized worlds with reordered leg
 
 ### 7. Persistent belief tracker in default and parallel self-play
 
-Current default self-play creates a `BeliefTracker` per game and passes it into `run_belief()`.
+The earlier default self-play path created a `BeliefTracker` per game and passed
+it into the legacy pooled search. Tier-A Phase 0 now blocks belief-guided
+clean-label sample writing. Phase 5 owns the full-world persistent tracker
+replacement; Phase 10 owns observed-action updates in real self-play.
 
 Primary files:
 
@@ -255,9 +279,10 @@ Priority: **Critical**
 - forced/single-action filtering
 - auxiliary race/clock targets
 
-`training/league.py` currently lags behind. `NetPlayer.act()`:
+At the historical backlog snapshot, `training/league.py` lagged behind.
+`NetPlayer.act()`:
 
-- calls `run_belief()` without a persistent tracker
+- called the former `run_belief()` without a persistent tracker
 - executes `engine.step(...)`
 - ignores `matched/success`
 - records samples without clean filtering
@@ -308,7 +333,9 @@ class Player:
 
 `NetPlayer.begin_game()` should reset its `BeliefTracker`.
 
-`NetPlayer.act()` should pass the tracker into `run_belief()`.
+After the Tier-A release gate, `NetPlayer.act()` should pass the seat tracker
+into the structured full-world `run_infoset()` path. It must not route
+clean-label samples through `run_pimc_diagnostic()`.
 
 Also enforce the same sample filtering used by `run.py`:
 
@@ -406,6 +433,13 @@ Priority: **Critical**
 
 ## 4. Use inkwell belief inside search, not only as an auxiliary loss
 
+### Tier-A status
+
+Phase 1 is complete: the canonical `World` contract and strict opponent
+hidden-pool witness boundary now expose hand, inkwell, and deck IDs safely to the
+search-only sampler. The remaining active wiring is sequenced across Phases 2,
+3, 4, and 7 of `tier-a-belief-search-remediation-plan.md`.
+
 ### Current logic
 
 The bot learns inkwell belief:
@@ -470,6 +504,12 @@ Priority: **High**
 ---
 
 ## 5. Make belief tracking action-likelihood aware
+
+### Tier-A status
+
+The isolated hook is not sufficient for clean labels. Phase 5 owns full-world
+particles and persistent evidence transitions; Phase 10 owns non-leaking
+observed-action integration in real self-play.
 
 ### Current logic
 
@@ -921,6 +961,12 @@ Priority: **Medium-High**
 
 ## 15. Return full belief probabilities from the evaluator
 
+### Tier-A status
+
+`StructuredBeliefEvaluator` exists, but the active clean-label wiring remains
+blocked. Tier-A Phase 4 owns promotion of the structured evaluator contract after
+the Phase-2 sampler and Phase-3 full-world bridge are ready.
+
 ### Current logic
 
 The model can output hand and inkwell logits, but `belief_probs()` returns only hand probabilities.
@@ -1354,6 +1400,11 @@ Priority: **Medium**
 ---
 
 # Recommended Implementation Order
+
+For Tier-A belief-search correctness, this historical backlog order is superseded
+by the dependency-ordered commit sequence in
+`tier-a-belief-search-remediation-plan.md`. The immediate next step is Phase 2
+structured sampler math.
 
 1. Exact `run_paths` execution integrity
 2. League path parity with default self-play

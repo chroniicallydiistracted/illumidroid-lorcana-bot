@@ -18,12 +18,34 @@ research-scale items are sequenced below (honest effort, not hand-waved).
 
 Verification: fast 22/22, engine 24/24.
 
-## Tier A — belief-search correctness — ~~FIXED (with tests)~~ *UPDATE: NOT IMPLEMENTED END-TO-END*
+## Tier A — belief-search correctness — IN PROGRESS
 
 The earlier completion claim was disproven by the follow-up audit.
 `illumidroid_full_ismcts_implementation_spec.md` remains the #2 design spec.
-Phase 0 of `tier-a-belief-search-remediation-plan.md` is now implemented:
-belief-guided clean-label training fails closed while the remaining fixes land.
+`tier-a-belief-search-remediation-plan.md` is the authoritative implementation
+sequence.
+
+Current audited checkpoint:
+
+```text
+Phase 0   complete — belief-guided clean-label training fails closed
+Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
+Next      Phase 2 structured sampler math
+```
+
+Phase 1 now provides a strict `World.validate_against_obs()` contract and a shared
+`World.opponent_hidden_pool()` / `_witness_pool()` boundary. The source witness
+rejects missing or malformed zones, non-integer counters, non-string or empty IDs,
+duplicate IDs, and hidden-zone cardinalities that disagree with public counts.
+`World.seed` is enforced as a non-empty string for clean-label admission.
+Belief-guided clean-label training remains blocked while the downstream phases land.
+
+### Historical partial implementation snapshot
+
+The following table records the earlier isolated algorithm work. It is not a
+release-complete Tier A claim; the follow-up findings below still govern the active
+remediation.
 
 | # | Finding | Fix | Tests |
 |---|---|---|---|
@@ -43,10 +65,14 @@ RPC optimization, §9/§16, is deferred. Legacy PIMC now remains available only 
 leak-free in Python from the filtered obs (server-side key + per-observer history projection,
 §6.3, is a later refinement).
 
-*TIER A ISSUE FINDINGS*
+### Historical follow-up audit findings
 
-**Audit Result**
-Tier A is not complete end-to-end. The isolated algorithms are promising and all 64 tests pass, but the active training paths still produce contaminated or incomplete search labels.
+**Audit result at remediation start**
+Tier A was not complete end-to-end. The isolated algorithms were promising and
+64 tests passed at that snapshot, but active training paths still produced
+contaminated or incomplete search labels. Phase 0, Phase 13 baseline setup, and
+Phase 1 have since landed; the unresolved downstream findings remain sequenced in
+the authoritative remediation plan.
 
 **Findings**
 1. **Critical: active determinization leaks opponent inkwell membership.**  
@@ -86,9 +112,9 @@ The root-invariance test samples only hand + deck in [test_search_belief.py](/ho
 The exact conditional-Bernoulli sampler works in its tested path. Per-seat trackers are instantiated correctly. The shared `InfoSetTable`, action-ID alignment, invalid-path quarantine, and synthetic strategy-fusion fixture are real improvements.
 
 **Verification**
-Ran successfully:
+Latest Phase-1 GO verification:
 ```text
-../lorcana-bot-venv/bin/python -m pytest -q   # 64 passed
+../lorcana-bot-venv/bin/python -m pytest -q   # 111 passed / 18 xfailed (129 collected)
 git diff --check
 python -m compileall -q engine network search training tests
 ```

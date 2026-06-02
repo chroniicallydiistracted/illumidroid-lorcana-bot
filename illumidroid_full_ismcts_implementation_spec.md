@@ -11,10 +11,30 @@ This is the implementation specification for audit finding **#2 full ISMCTS**.
 It assumes audit findings **#5 valid world sampling / importance correction** and
 **#4 per-seat persistent action-likelihood belief** land first.
 
+## Implementation Checkpoint
+
+This document is the research and end-state specification. The authoritative
+dependency order and live remediation status are maintained in
+`tier-a-belief-search-remediation-plan.md`.
+
+Audited current checkpoint:
+
+```text
+Phase 0   complete — belief-guided clean-label sample writing fails closed
+Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
+Next      Phase 2 structured sampler math
+```
+
+Sections labeled “current” below describe the pre-remediation audit baseline unless
+an explicit checkpoint note says otherwise. Clean-label belief-guided training
+remains blocked until the full Tier A release gate passes.
+
 ## 1. Executive Verdict
 
-The current `run_belief()` implementation is not full ISMCTS. It is a
-determinized-UCT / PIMC-style ensemble:
+The pre-remediation `run_belief()` implementation, now quarantined as
+`run_pimc_diagnostic()`, is not full ISMCTS. It is a determinized-UCT /
+PIMC-style ensemble:
 
 1. Sample a hidden world.
 2. Build a new perfect-information PUCT tree for that world.
@@ -166,20 +186,32 @@ Once simulated histories exist, snapshot handles must include:
 - public neural history;
 - per-observer perfect-recall history.
 
-### 3.7 Root world sampling is not yet the final contract
+### 3.7 Root world contract checkpoint
 
-Current `World` at `lorcana-bot/search/determinize.py:21-24` contains only:
+Phase 1 has landed the canonical Python `World` boundary:
 
 ```python
-hand_ids: list[str]
-weight: float
+@dataclass(frozen=True)
+class World:
+    opponent_hand_ids: tuple[str, ...]
+    opponent_inkwell_ids: tuple[str, ...]
+    opponent_deck_ids: tuple[str, ...]
+    self_deck_ids: tuple[str, ...] | None
+    seed: str
+    log_target: float
+    log_proposal: float
+    rho: float
+    weight: float
 ```
 
-Current Bun determinization at
-`lorcana-bot/engine/node_server/server.ts:396-443` fills the remaining hidden
-zones internally. That was a correct leak-removal fix, but the final search
-contract needs an explicit reproducible world specification so #5 and #4 can
-sample and audit the same full hidden assignment.
+`World.opponent_hidden_pool()` and `World.validate_against_obs()` share a strict
+source-witness validator. Missing or malformed zones, contradictory zone
+cardinalities, non-string or empty instance IDs, duplicate source IDs, malformed
+public counters, invalid partitions, and malformed clean-label seeds fail closed.
+
+The remaining bridge gap is unchanged: the diagnostic Bun determinizer still
+accepts hand IDs only and fills the remaining hidden zones internally. Phase 3
+adds the full-world RPC; Phase 7 routes `EngineSimulator.begin_lane()` through it.
 
 ## 4. Required End-State Semantics
 
@@ -236,7 +268,7 @@ Do not carry the current Gumbel-top-k approximation into full ISMCTS. In
 assumption. Gumbel top-k with `log(p)` is not generally the same distribution as
 a count-conditioned independent-Bernoulli subset.
 
-Recommended #5 implementation:
+Required Phase-2 continuation:
 
 1. Predict hand and inkwell zone logits over every opponent hidden instance.
 2. Sample a count-constrained zone assignment exactly with dynamic programming.
@@ -260,20 +292,20 @@ A DP over `(card_index, hand_slots, ink_slots)` samples the exact constrained
 categorical assignment. This is simpler and safer than computing the unordered
 proposal probability of the current Gumbel-top-k sampler.
 
-Final Python shape:
+Canonical Python shape established by Phase 1:
 
 ```python
 @dataclass(frozen=True)
 class World:
-    world_id: str
     opponent_hand_ids: tuple[str, ...]
     opponent_inkwell_ids: tuple[str, ...]
     opponent_deck_ids: tuple[str, ...]
-    self_deck_ids: tuple[str, ...]
+    self_deck_ids: tuple[str, ...] | None
     seed: str
     log_target: float = 0.0
     log_proposal: float = 0.0
     rho: float = 1.0
+    weight: float = 1.0
 ```
 
 If deck orders are generated server-side from `seed`, they can be omitted from
@@ -721,6 +753,7 @@ The Bun determinizer must reject malformed worlds:
 - wrong hand count;
 - wrong inkwell count;
 - hidden-pool conservation failure;
+- non-string, empty, duplicate, or unknown supplied self-deck IDs;
 - self-deck conservation failure.
 
 Return a structured error with `worldId`. Never silently filter IDs as current
@@ -740,8 +773,9 @@ def run_infoset(
     ...
 ```
 
-Keep `run_belief()` as a compatibility wrapper during migration, then delete or
-rename it after callers move.
+The legacy wrapper has already been renamed `run_pimc_diagnostic()` and
+quarantined from clean-label sample writing. Migrate future clean-label callers
+only to the structured full-world `run_infoset()` path.
 
 Wave algorithm:
 
@@ -894,10 +928,13 @@ turn caps, and auxiliary targets consistently.
 
 ### `lorcana-bot/search/determinize.py`
 
-- Replace hand-only `World` with full reproducible hidden-world spec.
+- **DONE (Phase 1 audited GO):** define the canonical full reproducible `World`
+  contract, strict opponent hidden-pool witness validation, and clean-label seed
+  admission checks.
 - Add exact count-constrained hand/inkwell assignment sampler from #5.
 - Keep `rho`, `log_target`, and `log_proposal` diagnostics.
-- Add world conservation and deterministic replay tests.
+- **PARTIAL:** Phase 1 world-contract tests landed; Phase 2/12 add sampler math and
+  end-to-end deterministic replay proofs.
 
 ### `lorcana-bot/search/belief_filter.py`
 
@@ -1170,8 +1207,11 @@ reintroduce the correctness bug.
 
 ## 17. Suggested Commit Sequence
 
-1. **#5 sampler**: exact joint hand/inkwell world sampling and reproducible
-   `World` spec.
+Current checkpoint: the canonical `World` portion of item 1 is complete and
+audited. The next implementation step is the remaining Phase-2 sampler math.
+
+1. **#5 sampler**: exact joint hand/inkwell world sampling; the reproducible
+   canonical `World` contract is already established by Phase 1.
 2. **#4 trackers**: per-seat persistent belief and observed-action likelihood.
 3. **History correctness**: bundled snapshots, branch-local public history,
    per-observer key history.

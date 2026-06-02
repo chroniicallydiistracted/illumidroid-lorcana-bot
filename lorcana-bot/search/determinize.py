@@ -27,29 +27,133 @@ Pure / engine-free so the weighting math is unit-testable.
 
 from __future__ import annotations
 
+import hashlib
 import math
+import numbers
 from dataclasses import dataclass
 
 import numpy as np
+
+
+def _default_base_seed(pool_ids: list[str], probs, hand_count: int, n_worlds: int,
+                       proposal: str, ink_probs, ink_count: int) -> str:
+    """Deterministic base seed derived from ALL sampler inputs — pool ids, the belief
+    `probs` AND `ink_probs`, counts, and proposal — so two identical calls reproduce
+    identical world seeds while a different belief (e.g. reversed `probs`) changes them.
+
+    This is content-derived, NOT context-derived: it does not encode the caller's game/
+    seat/decision/sim/RNG identity, so it cannot by itself disambiguate two decisions
+    that happen to share inputs. Callers that need true run-level reproducibility pass an
+    explicit `base_seed` (Phase 12 threads the real `game:seat:decision:sim` context)."""
+    pb = np.asarray(probs, dtype=np.float64).round(9).tobytes() if probs is not None else b""
+    ib = np.asarray(ink_probs, dtype=np.float64).round(9).tobytes() if ink_probs is not None else b""
+    h = hashlib.blake2b(digest_size=8)
+    h.update(repr((list(pool_ids), int(hand_count), int(n_worlds), proposal, int(ink_count))).encode())
+    h.update(pb)
+    h.update(ib)
+    return f"sw:{h.hexdigest()}"
 
 _EPS = 1e-9
 _CLIP = 1e-6
 
 
+class WorldContractError(ValueError):
+    """A `World` violates the canonical full-hidden-zone determinization contract."""
+
+
+def _require_public_count(d, key: str, who: str) -> int:
+    """STRICT public-count read (fail-closed): the key MUST be present, non-None, and a
+    NON-NEGATIVE INTEGER. `bool`, `float`, `str`, and list/tuple are all rejected (no
+    coercion) — a malformed counter cannot witness a leak-free partition."""
+    if not isinstance(d, dict) or key not in d or d[key] is None:
+        raise WorldContractError(f"{who} is missing public count '{key}' (fail-closed)")
+    v = d[key]
+    # bool is a subclass of int; exclude it explicitly. Accept Python/NumPy integers only.
+    if isinstance(v, bool) or not isinstance(v, numbers.Integral):
+        raise WorldContractError(
+            f"{who} public count '{key}' must be a non-negative int, "
+            f"got {type(v).__name__} {v!r} (fail-closed)")
+    if int(v) < 0:
+        raise WorldContractError(f"{who} public count '{key}' must be non-negative, got {v} (fail-closed)")
+    return int(v)
+
+
+def _strict_zone_ids(hidden: dict, key: str) -> list[str]:
+    """STRICT hidden-zone read (fail-closed): the zone MUST be present + list-like, and every
+    entry MUST be a non-empty string id — a dict entry MUST carry a non-empty string `id`
+    (a missing `id` raises `WorldContractError`, never a raw `KeyError`)."""
+    if key not in hidden or not isinstance(hidden[key], (list, tuple)):
+        raise WorldContractError(f"hidden zone '{key}' is missing or not list-like (fail-closed)")
+    out: list[str] = []
+    for entry in hidden[key]:
+        if isinstance(entry, dict):
+            if "id" not in entry:
+                raise WorldContractError(f"hidden zone '{key}' entry is missing 'id' (fail-closed)")
+            cid = entry["id"]
+        else:
+            cid = entry
+        if not isinstance(cid, str) or not cid.strip():
+            raise WorldContractError(
+                f"hidden zone '{key}' has a non-string/empty id {cid!r} (fail-closed)")
+        out.append(cid)
+    return out
+
+
+def _witness_pool(obs: dict) -> dict:
+    """STRICT opponent hidden-pool WITNESS (fail-closed). Validates the SOURCE evidence in
+    `obs["hidden"]` BEFORE anything partitions it (Phase 2 consumes this as a hard boundary):
+      * `players`/`opp` present; all three opponent public counts present non-negative ints;
+      * each hidden zone present, list-like, with non-empty STRING ids;
+      * each hidden zone CARDINALITY equals its public count (no contradictory witness);
+      * NO id duplicated across hand/inkwell/deck (no duplicate witness).
+    Returns {hand_ids, inkwell_ids, deck_ids, hand_count, inkwell_count, deck_count}."""
+    players = obs.get("players")
+    if not isinstance(players, dict):
+        raise WorldContractError("obs.players is missing or not a dict (fail-closed)")
+    opp = players.get("opp")
+    if not isinstance(opp, dict):
+        raise WorldContractError("obs.players.opp is missing (fail-closed)")
+    hidden = obs.get("hidden")
+    if not isinstance(hidden, dict):
+        raise WorldContractError("obs has no hidden opponent zones (fail-closed)")
+    hand = _strict_zone_ids(hidden, "hand")
+    ink = _strict_zone_ids(hidden, "inkwell")
+    deck = _strict_zone_ids(hidden, "deck")
+    hc = _require_public_count(opp, "handCount", "opp")
+    kc = _require_public_count(opp, "inkwell", "opp")
+    dc = _require_public_count(opp, "deckCount", "opp")
+    if len(hand) != hc:
+        raise WorldContractError(f"hidden hand witness count {len(hand)} != opp.handCount {hc} (fail-closed)")
+    if len(ink) != kc:
+        raise WorldContractError(f"hidden inkwell witness count {len(ink)} != opp.inkwell {kc} (fail-closed)")
+    if len(deck) != dc:
+        raise WorldContractError(f"hidden deck witness count {len(deck)} != opp.deckCount {dc} (fail-closed)")
+    allids = hand + ink + deck
+    if len(allids) != len(set(allids)):
+        raise WorldContractError("duplicate id across hidden hand/inkwell/deck witness (fail-closed)")
+    return {"hand_ids": hand, "inkwell_ids": ink, "deck_ids": deck,
+            "hand_count": hc, "inkwell_count": kc, "deck_count": dc}
+
+
 @dataclass(frozen=True)
 class World:
-    """A reproducible hidden-world specification for one determinization (#5/#2).
+    """The single canonical full-hidden-zone determinization contract (Tier-A Phase 1).
 
-    `opponent_*` partitions the opponent's known hidden pool; `self_deck_ids` is the
-    searching actor's own deck (composition known, order unknown -> shuffled).
-    `log_target`/`log_proposal`/`rho` are kept for auditability even when direct
-    posterior sampling makes `rho == 1`.
+    `opponent_*` exactly partitions the opponent's known hidden pool (hand + inkwell +
+    deck); `self_deck_ids` is the searching actor's own deck ORDER and is the one
+    optional field — `None` means "not supplied" (the server may realize the order from
+    `seed`), `()` means "supplied and empty". `seed` is part of the contract (canonical
+    here in Phase 1; Phase 12 verifies reproducibility end-to-end). `log_target`/
+    `log_proposal`/`rho` are kept for auditability even when posterior sampling makes
+    `rho == 1`.
+
+    These search-only identities must NEVER enter the policy/value trunk.
     """
 
     opponent_hand_ids: tuple[str, ...] = ()
     opponent_inkwell_ids: tuple[str, ...] = ()
     opponent_deck_ids: tuple[str, ...] = ()
-    self_deck_ids: tuple[str, ...] = ()
+    self_deck_ids: tuple[str, ...] | None = None     # None = unsupplied; () = supplied-empty
     seed: str = ""
     log_target: float = 0.0
     log_proposal: float = 0.0
@@ -60,6 +164,77 @@ class World:
     @property
     def hand_ids(self) -> list[str]:
         return list(self.opponent_hand_ids)
+
+    # -- canonical hidden-pool exposure for the search-only sampler --------------
+    @staticmethod
+    def opponent_hidden_pool(obs: dict) -> dict:
+        """The COMPLETE opponent hidden pool the search-only sampler partitions:
+        per-zone instance ids (hand/inkwell/deck) + the public counts. Sourced from
+        `obs["hidden"]` (search-only) + `obs["players"]["opp"]`; never fed to the trunk.
+
+        STRICT/fail-closed: delegates to `_witness_pool`, so it raises `WorldContractError`
+        on missing `players`/`opp`/`hidden`, a missing/non-integer public counter, a missing
+        or malformed hidden zone, a NON-STRING/empty id, a zone cardinality that disagrees
+        with its public count, or a duplicate id across zones. A downstream sampler (Phase 2)
+        must never receive a silently empty or incoherent pool."""
+        return _witness_pool(obs)
+
+    # -- contract validation -----------------------------------------------------
+    def validate_against_obs(self, obs: dict, *, require_seed: bool = True,
+                             require_self_deck: bool = False) -> "World":
+        """Prove this world is a legal full partition of the opponent's hidden pool for
+        `obs` (raises `WorldContractError` on any violation; returns self on success).
+
+        Checks (Phase 1 contract, STRICT/fail-closed): `seed` is a STRING (and non-empty for
+        clean-label); the SOURCE hidden pool is validated by `_witness_pool` (well-formed
+        string ids, zone cardinalities == public counts, no duplicate ids); the world's
+        per-zone counts match those public counts; the world has no internal duplicates; the
+        world partition equals the validated witness pool; `self_deck_ids` (when supplied)
+        requires `self.deckCount` present and matching. Any missing/None/malformed field is
+        REJECTED — an incomplete or incoherent observation cannot witness a leak-free
+        partition.
+        """
+        hand, ink, deck = self.opponent_hand_ids, self.opponent_inkwell_ids, self.opponent_deck_ids
+
+        # seed is declared `str` — enforce the type always; require non-empty for clean-label.
+        if not isinstance(self.seed, str):
+            raise WorldContractError(
+                f"World.seed must be a string, got {type(self.seed).__name__} (fail-closed)")
+        if require_seed and not self.seed.strip():
+            raise WorldContractError("World.seed is empty/whitespace; clean-label ISMCTS requires a seed")
+
+        # STRICT witness validation of the SOURCE hidden pool (counts, ids, cardinalities, dups)
+        pool_info = _witness_pool(obs)
+        hc, kc, dc = pool_info["hand_count"], pool_info["inkwell_count"], pool_info["deck_count"]
+
+        # the world's per-zone partition must match the public counts
+        if len(hand) != hc:
+            raise WorldContractError(f"opponent_hand_ids count {len(hand)} != opp.handCount {hc}")
+        if len(ink) != kc:
+            raise WorldContractError(f"opponent_inkwell_ids count {len(ink)} != opp.inkwell {kc}")
+        if len(deck) != dc:
+            raise WorldContractError(f"opponent_deck_ids count {len(deck)} != opp.deckCount {dc}")
+        # no duplicate ids across the world's three zones
+        allids = list(hand) + list(ink) + list(deck)
+        if len(allids) != len(set(allids)):
+            raise WorldContractError("duplicate id across opponent hand/inkwell/deck")
+        # the world partition must equal the validated (dedup-checked) witness pool exactly
+        pool = set(pool_info["hand_ids"] + pool_info["inkwell_ids"] + pool_info["deck_ids"])
+        if set(allids) != pool:
+            missing = pool - set(allids)
+            extra = set(allids) - pool
+            raise WorldContractError(
+                f"partition != hidden pool (missing={sorted(missing)}, extra={sorted(extra)})")
+        # self deck: when an order is supplied (None == unsupplied), self.deckCount MUST be
+        # present and match
+        if self.self_deck_ids is not None:
+            sdc = _require_public_count(obs["players"].get("self"), "deckCount", "self")
+            if len(self.self_deck_ids) != sdc:
+                raise WorldContractError(
+                    f"self_deck_ids count {len(self.self_deck_ids)} != self.deckCount {sdc}")
+        elif require_self_deck:
+            raise WorldContractError("self_deck_ids is unsupplied but required")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +377,7 @@ def sample_worlds(pool_ids: list[str], probs: np.ndarray, hand_count: int,
                   n_worlds: int, proposal: str = "belief",
                   rng: np.random.Generator | None = None,
                   ink_probs: np.ndarray | None = None, ink_count: int = 0,
+                  base_seed: str | None = None,
                   ) -> list[World]:
     """Return N belief-sampled opponent worlds with EXACT importance weights.
 
@@ -210,14 +386,22 @@ def sample_worlds(pool_ids: list[str], probs: np.ndarray, hand_count: int,
     and splits the residual into inkwell/deck (count-consistent, the leak-free
     server behavior). `weight` is the normalized importance weight (Σ = n_worlds);
     `rho` is the raw exact b/q (== 1 for the belief proposal).
+
+    Every returned `World` carries a deterministic non-empty `seed` (Phase 1 canonical
+    contract): `f"{base}:particle={i}"`, where `base` is `base_seed` or a stable hash
+    of the sampler inputs. Identical inputs (incl. the RNG seed) reproduce identical
+    worlds and seeds.
     """
     rng = rng or np.random.default_rng()
     if n_worlds <= 0:
         return []
     n = len(pool_ids)
     hand_count = max(0, min(int(hand_count), n))
+    base = base_seed or _default_base_seed(pool_ids, probs, hand_count, n_worlds,
+                                           proposal, ink_probs, ink_count)
     if n == 0 or hand_count == 0:
-        return [World(weight=1.0, rho=1.0) for _ in range(n_worlds)]
+        return [World(weight=1.0, rho=1.0, seed=f"{base}:particle={i}")
+                for i in range(n_worlds)]
 
     probs = np.clip(np.asarray(probs, dtype=np.float64), _CLIP, 1 - _CLIP)
     log_target_norm = _log_Z(probs, hand_count)    # normalizer of the count-conditioned target
@@ -259,6 +443,7 @@ def sample_worlds(pool_ids: list[str], probs: np.ndarray, hand_count: int,
             opponent_hand_ids=tuple(pool_ids[j] for j in hand_idx),
             opponent_inkwell_ids=tuple(pool_ids[j] for j in ink_idx),
             opponent_deck_ids=tuple(pool_ids[j] for j in deck_idx),
+            seed=f"{base}:particle={i}",
             log_target=float(logt), log_proposal=float(logq),
             rho=float(rho[i]), weight=float(w[i]),
         ))

@@ -35,11 +35,29 @@ Clean-label training must remain blocked until every Tier A remediation phase be
 
 # Current repo facts confirmed
 
+Audited implementation checkpoint:
+
+```text
+Phase 0   complete — belief-guided clean-label sample writing fails closed
+Phase 13  baseline installed — 20 runtime probes total: 2 passing Phase-1 probes,
+          18 strict expected-red probes owned by later phases
+Phase 1   complete — audited GO
+Next      Phase 2 structured sampler math
+```
+
+The latest verification is `111 passed / 18 xfailed` (`129` collected);
+`compileall` and `git diff --check` are clean. Clean-label belief-guided training
+remains blocked until the final Tier A release gate.
+
 The repository currently contains both a legacy `BeliefEvaluator` and a structured evaluator. The legacy evaluator samples only opponent hand plus deck IDs, excluding opponent hidden inkwell IDs, while `StructuredBeliefEvaluator` already exposes hand and inkwell probability channels over hand, deck, and inkwell pools.
 
 Phase 0 now blocks active belief-guided sample writing before evaluator construction in `training/run.py`, `training/parallel.py`, `training/selfplay.py`, league training, and exploiter training. The legacy pooled search remains available only as `run_pimc_diagnostic()`.
 
-`World` already has rich fields for opponent hand, opponent inkwell, opponent deck, self deck, seed, target/proposal logs, and rho, but active bridge paths still pass only hand IDs through determinization.
+Phase 1 established `World` as the canonical full hidden-zone contract. Its strict
+`_witness_pool()` boundary validates source `obs["hidden"]` identities, public
+zone cardinalities, duplicate freedom, and malformed input before Phase 2 can
+sample from that pool. Active bridge paths still pass only hand IDs through
+determinization, which remains the Phase 3/7 gap.
 
 `EngineSimulator.begin_lane()` restores the snapshot and calls `engine.determinize(self_id, list(world.opponent_hand_ids), seed=...)`, ignoring sampled opponent inkwell, opponent deck, and self deck fields.
 
@@ -209,6 +227,91 @@ The training loops cannot silently produce samples from legacy PIMC or hand-only
 
 ## Phase 1 — define one canonical full hidden-zone `World` contract
 
+### Status
+
+Completed — **audited GO**. `World` is now the canonical contract: `self_deck_ids: tuple|None`
+distinguishes unsupplied (`None`) from supplied-empty (`()`); `World.seed` is part of
+the contract and every `sample_worlds()` world carries a deterministic non-empty seed
+(`f"{base}:particle={i}"`, `base` = caller `base_seed` or a stable input hash — Phase 12
+threads the real `game:seat:decision:sim` context). `World.validate_against_obs(obs, *,
+require_seed=True, require_self_deck=False)` raises `WorldContractError` on any of:
+per-zone count mismatch vs public opp counts, duplicate id across opp hand/ink/deck,
+partition ≠ known hidden pool, supplied self-deck count mismatch, empty clean-label
+seed. `World.opponent_hidden_pool(obs)` exposes the complete search-only pool
+(hand/ink/deck ids + counts) — never fed to the trunk.
+
+Review NO-GO (findings 1–3) remediated:
+- **F1 (fail-open validation):** `validate_against_obs` now FAILS CLOSED when the hidden
+  block is missing/None/non-dict (cannot witness the pool), and the partition-vs-pool
+  comparison is UNCONDITIONAL when hidden is supplied (incl. an empty pool). The two
+  reviewer repros (`missing-hidden-key`, `explicit-empty-hidden` admitting an invented
+  card) are now REJECTED.
+- **F2 (hand-only path reachable past the guard):** `EngineSimulator` now gates the
+  hand-only determinization at the SEARCH boundary — `begin_lane` fails closed
+  (`TierARemediationIncompleteError`, 0 determinize calls) unless constructed with the
+  explicit `hand_only_diagnostic=True` opt-in. `run_infoset` is marked DIAGNOSTIC-ONLY
+  and opts in explicitly; it is not a clean-label path until Phases 3/7/6.
+- **F3 (weak fallback seed):** `_default_base_seed` now hashes `probs` and `ink_probs`
+  too, so reversing the belief changes the world seeds. Documentation no longer claims
+  context-level (game/seat/decision/RNG) uniqueness — that is Phase 12's `base_seed`.
+
+Re-review NO-GO (edge-case audit) remediated:
+- **R1 (validation fails open on incomplete dict obs):** `validate_against_obs` is now
+  STRICT/fail-closed — `obs.players[.opp]` and ALL three opponent public counters must be
+  present (via `_require_public_count`), ALL three hidden zones must be present + list-like
+  (now enforced through `_witness_pool` / `_strict_zone_ids`), and a supplied `self_deck_ids` requires `self.deckCount`
+  present. The five reviewer repros (`hidden={}`, missing-`deck`, None-valued zones,
+  `players.opp={}`, supplied-`()`-with-missing-`self.deckCount`) are now all REJECTED.
+- **R2 (gate masked 4 Phase 13 probes):** the four lane/branch-history probes now construct
+  `EngineSimulator(..., hand_only_diagnostic=True)` so they pass THROUGH the Phase-1 gate and
+  fail at their owned point (lane adapter / `info_set_key`, Phase 6/7/8/9) — verified with
+  `--runxfail`: no longer `TierARemediationIncompleteError`, still strict-xfail (no XPASS).
+- **R3 (legacy hand-only RPC unlabeled):** `bridge.determinize` + server `Session.determinize`
+  + the `"determinize"` op are now explicitly marked DIAGNOSTIC-ONLY / INVALID FOR
+  CLEAN-LABEL, replaced by `determinize_world` in Phase 3.
+
+Second re-review NO-GO (contract + harness gaps) remediated:
+- **S1 (`opponent_hidden_pool` failed open):** the documented sampler-exposure accessor is
+  now STRICT/fail-closed too (ultimately consolidated into `_witness_pool`) — `{}`,
+  `hidden={}`, and None-valued zones all raise instead of returning a silently-empty pool.
+- **S2 (regression `_obs()` fixture wrong schema):** the fixture used `players` as a LIST;
+  corrected to the real `{self, opp}` dict + `stableKey` legal, so the four lane probes now
+  reach their OWNED assertions instead of crashing in `info_set_key` (`'list' object ...`).
+- **S3 (six stale-API probes masked):** the three tracker probes (`BeliefTracker(seed=)`/
+  `._pf`), two diagnostics probes (`SearchConfig(sims=,max_depth=)`/`BISMCTS(...,seed=,tracker=)`/
+  `run_infoset(...,time_budget_s=)`), and the InfoSetTable probe (`get_or_create(key,legal)`)
+  were rewritten to the CURRENT API so each reproduces its owned defect. `--runxfail` now
+  shows ALL 18 probes failing at their owned assertions (test-file lines), zero library
+  TypeError/AttributeError masking.
+- **S4 (`_require_public_count` coerced malformed counters):** now accepts ONLY non-negative
+  integers (`numbers.Integral`, `bool` excluded); `True`/`1.9`/`"1"`/`["x"]` are rejected
+  (NumPy ints still accepted).
+
+Third re-review NO-GO (witness integrity + seed type) remediated:
+- **W1 (witness fail-open):** the SOURCE `obs["hidden"]` is now validated by a strict
+  `_witness_pool` (used by BOTH `opponent_hidden_pool` and `validate_against_obs`): every id
+  must be a non-empty STRING (a dict entry without `id` raises `WorldContractError`, not a raw
+  `KeyError`), each hidden zone CARDINALITY must equal its public count (no contradictory
+  witness), and NO id may repeat across zones (no duplicate witness — previously collapsed by
+  `set()`). The lenient `_zone_ids`/`_require_zone_ids` helpers were deleted. The reviewer's
+  four repros (duplicate, contradictory, non-string id, dict-without-id) are now REJECTED.
+- **W2 (seed type unenforced):** `validate_against_obs` now rejects a non-string `seed`
+  (`True`/`7`/`1.5`/`None`/bytes) and an empty/whitespace-only seed.
+
+Proof: `tests/test_world_contract.py` (34 tests) + the two owned Phase 13 probes converted to
+passing. `--runxfail` confirms all 18 remaining probes still fail at their owned assertions (no
+masking, no XPASS). Full suite **111 passed / 18 xfailed**; `compileall` + `git diff --check`
+clean. Zero drift: all non-test `World(...)` sites + both `sample_worlds()` callers valid;
+existing real-engine `run_infoset` tests still pass.
+
+NOT done here (correct sequencing): the hand-only `bridge.determinize` /
+`EngineSimulator.begin_lane` paths still exist (now explicitly gated diagnostic) and are
+replaced by `determinize_world` in Phases 3/7; tracker-produced worlds are still
+hand-only/seedless (Phase 5). `validate_against_obs` is defined but not yet ENFORCED at
+the lane boundary (Phase 7). Phase 3 must validate supplied `self_deck_ids` string IDs,
+uniqueness, membership, and conservation at the full-world server boundary before
+`loadState()`.
+
 ### Problem
 
 The `World` dataclass already contains rich fields, but the active engine path only honors `opponent_hand_ids`. This makes the current data model dishonest: the Python side can create a full world, but the TypeScript side ignores most of it.
@@ -225,7 +328,7 @@ class World:
     opponent_hand_ids: tuple[str, ...]
     opponent_inkwell_ids: tuple[str, ...]
     opponent_deck_ids: tuple[str, ...]
-    self_deck_ids: tuple[str, ...]
+    self_deck_ids: tuple[str, ...] | None
     seed: str
     log_target: float
     log_proposal: float
@@ -462,6 +565,11 @@ This must:
 9. return or expose the realized partition so Python can assert exact agreement
 ```
 
+For supplied `selfDeckIds`, validation before `loadState()` must also reject
+non-string/empty IDs, duplicate IDs, IDs absent from the authoritative self-deck
+pool, and conservation failures. Phase 1 validates whether a supplied order has
+the public count; Phase 3 owns authoritative self-deck membership validation.
+
 Keep the old random repartition method only if marked diagnostic/non-training.
 
 For clean-label search, prefer a zero-randomness RPC: Python supplies the complete realized partition and the server validates and loads it. If server-side self-deck shuffling is retained, it must be a deterministic function of `World.seed` and the server must expose the realized order for verification.
@@ -509,6 +617,9 @@ test_determinize_world_honors_requested_opponent_deck
 test_determinize_world_honors_requested_self_deck
 test_determinize_world_rejects_duplicate_hidden_ids
 test_determinize_world_rejects_missing_hidden_pool_ids
+test_determinize_world_rejects_malformed_self_deck_ids
+test_determinize_world_rejects_duplicate_self_deck_ids
+test_determinize_world_rejects_self_deck_conservation_failure
 test_determinize_world_is_reproducible_with_same_world_seed
 test_determinize_world_never_uses_math_random_when_world_seed_present
 ```
@@ -566,7 +677,7 @@ lorcana-bot/search/evaluator.py
 
 lorcana-bot/search/ismcts.py
   run_infoset()
-  run_belief() or renamed diagnostic equivalent
+  run_pimc_diagnostic()
 
 lorcana-bot/training/run.py
   selfplay_game()
@@ -762,7 +873,11 @@ test_tracker_reseed_replays_public_evidence
 
 ### Problem
 
-`run_infoset()` exists, but the code still supports default PIMC-style `run_belief()`. `run_belief()` samples worlds, runs separate searches, and pools root statistics, which is exactly the strategy-fusion pattern Tier A was meant to remove.
+`run_infoset()` exists, but it is still diagnostic-only until its downstream
+dependencies land. The former PIMC-style `run_belief()` implementation has
+already been quarantined as `run_pimc_diagnostic()`: it samples worlds, runs
+separate searches, and pools root statistics, which is exactly the
+strategy-fusion pattern Tier A must keep out of clean-label training.
 
 ### Required remediation
 
@@ -770,20 +885,20 @@ For clean-label training:
 
 ```text
 BISMCTS.run_infoset() is mandatory.
-BISMCTS.run_belief() is not allowed.
+BISMCTS.run_pimc_diagnostic() is not allowed.
 ```
 
 This phase is an activation step, not an early refactor. Land it only after the structured sampler, full-world tracker, full-world RPC, full-world lane adapter, lane-local histories, observed-action correction, and shared-node prior fix all pass their targeted tests.
 
 Change `training/run.py` and `training/parallel.py` so belief training does not branch between PIMC and full ISMCTS.
 
-Current pattern:
+Historical unsafe pattern:
 
 ```python
 if full_ismcts:
     res = mcts.run_infoset(...)
 else:
-    res = mcts.run_belief(...)
+    res = mcts.run_pimc_diagnostic(...)
 ```
 
 Required pattern:
@@ -811,7 +926,7 @@ lorcana-bot/training/parallel.py
 
 lorcana-bot/search/ismcts.py
   run_infoset()
-  run_belief()
+  run_pimc_diagnostic()
 ```
 
 ### Tests
@@ -827,7 +942,7 @@ Add:
 ```text
 test_belief_training_always_uses_run_infoset
 test_full_ismcts_flag_no_longer_controls_correctness
-test_run_belief_cannot_be_used_for_clean_label_samples
+test_run_pimc_diagnostic_cannot_be_used_for_clean_label_samples
 ```
 
 ### Completion criteria
@@ -1442,9 +1557,20 @@ Two identical full-ISMCTS runs with the same game seed and RNG seed produce the 
 
 ## Phase 13 — upgrade runtime tests so they catch the audited failures
 
+### Status
+
+Baseline installed and converting incrementally. `tests/test_tier_a_runtime_regressions.py`
+contains 20 probes spanning the canonical `World`, structured sampler, full-world
+bridge, active evaluator, persistent tracker, recall projection, lane adapter,
+self-play wiring, and shared-tree diagnostics boundaries. Phase 1 converted its
+2 probes to normal passing tests; 18 later-phase probes remain
+`pytest.mark.xfail(strict=True)`. Each owning remediation phase must remove its
+marker when the behavior is fixed; an unreviewed XPASS is intentionally a suite
+failure.
+
 ### Problem
 
-The current real-engine tests are too weak. The root-invariance test samples only hand plus deck, not inkwell.
+The original real-engine tests were too weak. The root-invariance test sampled only hand plus deck, not inkwell.
 
 ### Required remediation
 
@@ -1555,11 +1681,15 @@ Every available edge used by progressive widening has a prior derived from an ac
 
 Use this order. Keep clean-label training blocked until Commit 16 passes. Each commit adds or converts its owning regression tests; do not accumulate test work at the end.
 
-## Commit 1 — freeze unsafe training
+Current checkpoint: Commits 1–3 are complete and audited. Commit 2 remains an
+incrementally converting regression parent until Commit 16. **Next: Commit 4 /
+Phase 2 structured sampler math.**
+
+## Commit 1 — freeze unsafe training — DONE
 
 Implement Phase 0. Belief-guided clean-label training fails closed while remediation is in progress. Rename or mark PIMC as diagnostic-only.
 
-## Commit 2 — add expected-failing audit probes
+## Commit 2 — add expected-failing audit probes — BASELINE INSTALLED
 
 Start Phase 13. Add direct `xfail(strict=True)` or audit-only regressions for the audited failures before changing production behavior:
 
@@ -1576,11 +1706,11 @@ unseeded lane determinization
 new shared-node edge receives zero prior
 ```
 
-## Commit 3 — canonical deterministic `World`
+## Commit 3 — canonical deterministic `World` — DONE, AUDITED GO
 
 Implement Phase 1. Add strict partition validation, explicit optional self-deck semantics, and a required non-empty clean-label seed.
 
-## Commit 4 — structured sampler math
+## Commit 4 — structured sampler math — NEXT
 
 Implement Phase 2. Fix structured zero-hand worlds, true uniform joint proposals, raw `rho`, normalized `weight`, and deterministic sampled-world seeds.
 

@@ -393,10 +393,15 @@ class Session {
     return { hand: grab("hand"), deck: grab("deck"), inkwell: grab("inkwell") };
   }
 
-  /** Produce a LEAK-FREE determinized world the search runs on. From the acting
-   *  player's information set, ALL hidden zones must be randomized — otherwise
-   *  search reads privileged info (real inked cards, real future draws) and the
-   *  derived visit-policy/value training labels are contaminated:
+  /** DIAGNOSTIC-ONLY (Tier-A) — HAND-ONLY determinization, INVALID FOR CLEAN-LABEL
+   *  TRAINING. Replaced by full-`World` `determinizeWorld` in Tier-A Phase 3. It takes
+   *  ONLY `handInstanceIds` and RANDOMIZES the remaining hidden zones internally, so a
+   *  sampled World's opponent inkwell/deck and self deck ORDER are discarded (only the
+   *  partition is leak-free, not honored). Use the gated diagnostic path only
+   *  (`run_pimc_diagnostic` / `EngineSimulator(..., hand_only_diagnostic=true)`).
+   *
+   *  From the acting player's information set, ALL hidden zones are randomized so search
+   *  cannot read privileged info (real inked cards, real future draws):
    *    - opponent HAND     = the belief sample (`handInstanceIds`)
    *    - opponent INKWELL  = sampled (count-consistent) from the remaining hidden pool
    *    - opponent DECK     = the rest, shuffled
@@ -767,6 +772,9 @@ function handle(req: any): any {
       session.dropSnapshot(Number(req.id));
       return { ok: true };
     }
+    // DIAGNOSTIC-ONLY (Tier-A): hand-only determinization, INVALID for clean-label
+    // training. Phase 3 adds the full-`World` "determinize_world" op that honors the
+    // sampled opponent inkwell/deck + self deck order.
     case "determinize": {
       if (!session) return { ok: false, error: "no session" };
       const self = String(req.self);

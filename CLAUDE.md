@@ -10,7 +10,30 @@ Full architecture design: `lorcana-simulator/lorcana-bot-architecture.md`
 
 ---
 
-## Current state: Phase 3 COMPLETE (Phases 0–2 also complete)
+## Current Safety Checkpoint: Tier-A Remediation Active
+
+The historical Phase 0–3 milestone reports remain useful architecture context,
+but they do not prove belief-guided clean-label training correctness. The
+follow-up Tier-A audit found active-path gaps. The authoritative implementation
+sequence is `tier-a-belief-search-remediation-plan.md`.
+
+Audited checkpoint:
+
+```text
+Tier-A Phase 0   complete — belief-guided clean-label sample writing fails closed
+Tier-A Phase 13  baseline installed — 2 passing Phase-1 probes + 18 strict expected-red probes
+Tier-A Phase 1   complete — audited GO for the canonical full hidden-zone World boundary
+Next             Tier-A Phase 2 structured sampler math
+```
+
+Latest verification: `111 passed / 18 xfailed` (`129` collected), with clean
+`compileall` and `git diff --check`. Use `--no-belief` for diagnostics only.
+Do not resume belief-guided clean-label self-play until the Tier-A final release
+gate passes.
+
+---
+
+## Historical milestone state: Phase 3 COMPLETE (Phases 0–2 also complete)
 
 Phase 3 (League/PSRO self-play + exploitability gating — "becomes hard to beat")
 is done, in `lorcana-bot/training/`:
@@ -29,8 +52,9 @@ is done, in `lorcana-bot/training/`:
   anchors/checkpoints (gating signal) + a main-exploiter exploitability proxy.
 - **Orchestrator** (`league_train.py`) — generate → train → freeze → gate.
 
-Run: `python -m training.league_train --init checkpoints/bc_realdecks.pt
---iterations N --games G --sims S [--exploit]`. Tests: `test_league.py` (PFSP,
+Diagnostic run during Tier-A remediation: `python -m training.league_train
+--no-belief --init checkpoints/bc_realdecks.pt --iterations N --games G --sims S
+[--exploit]`. Tests: `test_league.py` (PFSP,
 Elo, KL, match routing + engine smoke). Report:
 `lorcana-simulator/phase3/PHASE3-COMPLETION-REPORT.md`.
 **Next is Phase 4** (ReBeL/PBS subgame solving + distributional/auxiliary value
@@ -46,17 +70,16 @@ the strength inflection point) is done, in `lorcana-bot/`:
   to the public hand size. The trunk is built only from the filtered view, so
   policy/value cannot see opponent identities (proven by a leak-free test).
   Trained on the true hidden world (free in self-play; bridge `hidden` block).
-- **Importance-weighted determinization** — `bridge.determinize()` repartitions
+- **Historical importance-weighted determinization path** — `bridge.determinize()` repartitions
   the opponent's hidden cards via state surgery; `search/determinize.py` samples
-  N worlds from the belief with weights `ρ_i = b/q`; `BISMCTS.run_belief` pools
-  per-world Phase-1 searches at the shared root (legal set is world-invariant,
-  since determinization only touches hidden cards).
-- **Bayesian filtering** — `search/belief_filter.py`: SIR particle filter
-  (neural belief = proposal, observed action = correction, ESS-triggered resample).
+  N worlds from the belief with weights `ρ_i = b/q`; the legacy root-pooled PIMC
+  implementation is now diagnostic-only as `BISMCTS.run_pimc_diagnostic`.
+- **Bayesian filtering prototype** — `search/belief_filter.py`: SIR particle
+  filter seam. Tier-A Phase 5 owns the full-world persistent replacement and
+  Phase 10 owns observed-action integration in real self-play.
 
-Tests: 27/27 pass. Report: `lorcana-simulator/phase2/PHASE2-COMPLETION-REPORT.md`,
+Historical tests: 27/27 passed. Report: `lorcana-simulator/phase2/PHASE2-COMPLETION-REPORT.md`,
 plan: `lorcana-simulator/phase2/PHASE2-PLAN.md`.
-**Next is Phase 3** (League/PSRO self-play + exploitability gating).
 
 **Real decks (done):** 25 real tournament-winning decklists live in
 `lorcana-bot/decks/*.json` (fixture shape `{name, cards}`; provenance in
@@ -253,9 +276,11 @@ in ONE `run_paths` IPC, and evaluates all leaves in ONE batched net forward
 this box — VRAM allows ~37M fp32 but data/latency cap usefulness lower). GPU
 engages at batch ≥256 + net ≥5M; the small 0.7M net leaves the GPU idle.
 
-**All-in-one runner:** `./train.sh [flags]` → `training/run.py`. **Parallel by
-default** (`--actors 6`): K spawn-isolated CPU workers (`training/parallel.py`)
-each own a Bun engine + run batched belief self-play, **streaming** progress +
+**All-in-one runner:** `./train.sh [flags]` → `training/run.py`. During Tier-A
+remediation, pass `--no-belief`; belief-guided clean-label sample writing fails
+closed. **Parallel by default** (`--actors 6`): K spawn-isolated CPU workers
+(`training/parallel.py`) each own a Bun engine + run batched diagnostic
+self-play, **streaming** progress +
 samples to a shared queue; the main process runs the GPU learner (KL+entropy) and
 updates a **`LiveMonitor`** (`training/monitor.py`) heartbeat every 3 s (phase,
 sims/s, dec/s, games/h, buffer, loss, winrate, GPU mem, ETA, per-worker result)
@@ -263,9 +288,9 @@ so a round is never a silent/blocked wait. `--actors 1` = single-process. Fresh
 workers reload the latest weights each round (spawn keeps them CUDA-free; only
 the main process touches the GPU). Ctrl-C saves and exits.
 ```bash
-./train.sh                                   # ~13M net, 6 actors, runs forever
-./train.sh --actors 8 --rounds 50 --sims 24 --batch 48 --eval-every 5
-./train.sh --actors 1                        # single-process fallback
+./train.sh --no-belief                                   # ~13M net, 6 actors
+./train.sh --no-belief --actors 8 --rounds 50 --sims 24 --batch 48 --eval-every 5
+./train.sh --no-belief --actors 1                        # single-process fallback
 ```
 Gotchas baked in (were bugs): worker rng needs an int seed; all worker setup is
 inside try/except so a crash reports instead of hanging; the drain loop has a
@@ -358,15 +383,15 @@ wasmtime kernel-final.wasm
 # Expect: WASM_RUN_OK / same_seed_identical=true / diff_seed_differs=true
 ```
 
-### Phase 1 ML stack (from repo root; venv at `lorcana-bot-venv/`)
+### Python ML stack (from repo root; venv at `lorcana-bot-venv/`)
 
 ```bash
 # tests (network/belief/determinize are fast; bridge/search spawn the Bun engine)
-lorcana-bot-venv/bin/python -m pytest lorcana-bot/tests        # 27 pass (P1+P2)
-# behaviour-clone the scripted oracle, then self-play from that prior
+lorcana-bot-venv/bin/python -m pytest lorcana-bot/tests        # 111 pass / 18 expected xfail
+# behaviour-clone the scripted oracle, then run non-belief diagnostics only
 cd lorcana-bot
 ../lorcana-bot-venv/bin/python -m training.bootstrap --games 20 --epochs 5 --out checkpoints/bc.pt
-../lorcana-bot-venv/bin/python -m training.selfplay  --init checkpoints/bc.pt --iterations 3 --games 4 --sims 32
+../lorcana-bot-venv/bin/python -m training.selfplay --no-belief --init checkpoints/bc.pt --iterations 3 --games 4 --sims 32
 ```
 The Bun engine server resolves the workspace via relative imports into
 `lorcana-simulator/packages/...`; `bridge.py` runs it with cwd = `lorcana-simulator/`.

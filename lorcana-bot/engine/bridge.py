@@ -154,9 +154,14 @@ class LorcanaEngine:
 
     def determinize(self, self_id: str, hand_instance_ids: list[str],
                     seed: str | None = None) -> dict:
-        """Repartition the opponent's hidden cards into hand=hand_instance_ids
-        (deck = the rest), producing a determinized world. Operates on the
-        current state — restore the true root first. Returns the world's obs."""
+        """DIAGNOSTIC-ONLY (Tier-A) — HAND-ONLY determinization, INVALID FOR CLEAN-LABEL
+        TRAINING. Repartitions the opponent's hidden cards into hand=hand_instance_ids and
+        randomizes the REST (opponent inkwell/deck, self deck order) internally, so the
+        sampled `World`'s opponent inkwell/deck and self deck are DISCARDED. This is
+        replaced by the full-`World` `determinize_world` RPC in Tier-A Phase 3; until then
+        callers must treat this as diagnostic (e.g. `run_pimc_diagnostic`, or
+        `EngineSimulator(..., hand_only_diagnostic=True)`). Operates on the current state —
+        restore the true root first. Returns the world's obs."""
         req = {"op": "determinize", "self": self_id, "handInstanceIds": hand_instance_ids}
         if seed is not None:
             req["seed"] = seed

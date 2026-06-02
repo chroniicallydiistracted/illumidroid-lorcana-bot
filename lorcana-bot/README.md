@@ -10,6 +10,10 @@ importance-weighted determinization**, leaf-batched GPU inference) → training
 **Tier-A remediation is active:** belief-guided clean-label training is
 fail-closed until the full hidden-zone shared-tree release gate passes. Run
 `../train.sh --no-belief` for non-belief diagnostics only.
+Audited checkpoint: Phase 0 guard complete; Phase 13 baseline installed
+(2 passing Phase-1 probes + 18 strict expected-red probes); Phase 1 canonical
+full hidden-zone `World` boundary complete and audited GO. Phase 2 structured
+sampler math is next.
 See `../CLAUDE.md` for current state + commands, `../lorcana-simulator/lorcana-bot-architecture.md`
 for the design, `PORT-AUDIT.md` for the engine-port analysis, and the phase
 reports in `../lorcana-simulator/phase{1,2,3}/`.
@@ -106,6 +110,11 @@ for diagnostics only. It must not produce training labels. Belief-guided
 clean-label self-play remains blocked until the structured full-world,
 shared-tree path passes the Tier-A release gate in
 `../tier-a-belief-search-remediation-plan.md`.
+
+Phase 1 of that remediation is complete: `search/determinize.py` now defines the
+canonical reproducible `World`, validates the complete opponent hidden-pool
+witness fail-closed, and enforces clean-label seed admission. The next active
+remediation step is Phase 2 sampler math.
 
 ## Real decks
 

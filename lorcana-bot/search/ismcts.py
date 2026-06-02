@@ -207,6 +207,12 @@ class BISMCTS:
         removing strategy-fusion bias. `total_simulations` is the TOTAL sim budget
         (one world each), NOT n_worlds × sims_per_world.
 
+        DIAGNOSTIC-ONLY until Tier-A Phases 3/7/6 land: the lane currently uses the
+        HAND-ONLY determinization RPC (it discards the world's opponent inkwell/deck and
+        self deck), so it is NOT a valid clean-label search yet — clean-label belief
+        sample writing stays blocked by the Phase 0 guard. This entry point is for
+        diagnostics/tests until full-world determinization and Phase 6 activation land.
+
         Returns a `SearchResult` with `pi` aligned to `root_obs["legal"]` so callers
         are unchanged. Requires the bridge `step_exact` op + a leak-free Python key.
         """
@@ -241,7 +247,11 @@ class BISMCTS:
             return d, value
 
         root_snap = self.engine.snapshot()
-        sim = EngineSimulator(self.engine, root_snap, self_id)
+        # DIAGNOSTIC-ONLY until Phases 3/7: the lane uses the HAND-ONLY determinization
+        # RPC (opponent inkwell/deck + self deck are discarded), so this is not yet a
+        # valid clean-label search. Opt into the gated hand-only path explicitly; the
+        # Phase 0 guard still blocks belief-guided sample WRITING upstream.
+        sim = EngineSimulator(self.engine, root_snap, self_id, hand_only_diagnostic=True)
         cfg = replace(self.cfg, simulations=int(total_simulations or self.cfg.simulations))
         # the actor-filtered key is engine-independent of the hidden world, so all root
         # determinizations must yield the root key — assert it to catch any leak.
