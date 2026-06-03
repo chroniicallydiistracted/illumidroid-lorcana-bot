@@ -1,0 +1,61 @@
+{
+  "formatVersion": "2.0.0",
+  "description": "Frozen byte-exact copy of the ENTIRE TypeScript Lorcana oracle closure (blueprint Step 0), vendored under oracle/source/. Hashes are content fingerprints; gitCommit is provenance only and is NOT part of any hash. See oracle/README.md for the exact algorithm.",
+  "gitCommit": "89af4d56592f74d0ee3b53d9a03194d4d1d2c5b8",
+  "vendoredFrom": "lorcana-simulator/ (workspace)",
+  "closure": {
+    "dirs": [
+      "packages/lorcana/lorcana-types",
+      "packages/lorcana/lorcana-engine",
+      "packages/lorcana/lorcana-cards",
+      "packages/shared",
+      "packages/typescript-config"
+    ],
+    "files": [
+      "package.json",
+      "pnpm-workspace.yaml",
+      "pnpm-lock.yaml",
+      ".npmrc"
+    ]
+  },
+  "excludes": {
+    "dirNames": [
+      "--exclude=node_modules",
+      "--exclude=dist",
+      "--exclude=.turbo",
+      "--exclude=.nx",
+      "--exclude=coverage",
+      "--exclude=.cache",
+      "--exclude=*.tsbuildinfo",
+      "--exclude=*.xml"
+    ],
+    "note": "non-source / install-state / regenerable only"
+  },
+  "hashingSpec": {
+    "algorithm": "sha256",
+    "fileBytes": "raw (no normalization)",
+    "manifestLine": "<sha256>  <relpath>",
+    "manifestSort": "ascending by POSIX-normalized relative path",
+    "partition": "card catalog = paths under packages/lorcana/lorcana-cards/; source = the rest",
+    "rulesetHash": "sha256(canonicalJson({ formatVersion, sourceHash, cardCatalogHash, deps }))",
+    "symlinks": "ignored"
+  },
+  "deps": {
+    "resolved": {
+      "seedrandom": "3.0.5",
+      "@types/seedrandom": "3.0.8"
+    },
+    "declared": {
+      "seedrandom": "^3.0.5",
+      "@types/seedrandom": "^3.0.8"
+    }
+  },
+  "counts": {
+    "totalFiles": 8889,
+    "sourceFiles": 643,
+    "cardFiles": 8246
+  },
+  "sourceHash": "54111db5ebc70837df5b20b59f31edb4fe42e2b59a7595197805a6df68d87a49",
+  "cardCatalogHash": "8b47f7aec2394b15dac548492f959a1195d27a4fae30119669be2a9cd9951996",
+  "rulesetHash": "b15fd6d0652804ce9fe898bf4fa9c6b41ecf2c35a3ca21b619415dfd5f60aca4"
+}

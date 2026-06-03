@@ -24,7 +24,10 @@ def changed_files() -> list[str]:
             out = subprocess.check_output(["git", "diff", "--name-only", "--cached"], text=True)
         except Exception:
             out = ""
-    return [x.strip() for x in out.splitlines() if x.strip()]
+    # The vendored frozen oracle (oracle/source/**) is a byte-exact reference
+    # copy, not port-authored code; exempt it from dependency-step gates. Its
+    # integrity is policed by the oracle freeze tests/verifier.
+    return [x.strip() for x in out.splitlines() if x.strip() and not x.strip().startswith("oracle/source/")]
 
 
 def main() -> int:
