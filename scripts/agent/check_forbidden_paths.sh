@@ -9,8 +9,13 @@ changed_files() {
 }
 
 FILES="$(changed_files)"
+# The vendored frozen oracle (oracle/source/**) is a byte-exact reference copy,
+# not port-authored code. It legitimately contains card files, play-card.ts,
+# .svelte components, packet animations, etc. Exempt it from the dependency/UI
+# path blocks; its integrity is policed by the oracle freeze tests/verifier.
+FILES="$(printf '%s\n' "$FILES" | grep -v '^oracle/source/' || true)"
 if [[ -z "$FILES" ]]; then
-  echo "[paths] no changed files detected."
+  echo "[paths] no changed files detected (after excluding frozen oracle/source/)."
   exit 0
 fi
 

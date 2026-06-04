@@ -2,7 +2,7 @@
 
 | Step | Name | Status | Branch | PR | Oracle hash | Tests | Codex verdict | Notes |
 |---:|---|---|---|---|---|---|---|---|
-| 0 | Freeze TypeScript oracle and card catalog hash | not started | | | | | | |
+| 0 | Freeze TypeScript oracle and card catalog hash | done (entire oracle vendored into `oracle/source/`, byte-exact + hashed; RNG golden vectors added) | port/step-00-freeze-oracle | | ruleset `b15fd6d0…5f60aca4` @ git `89af4d5` | `bun test oracle/tools/freeze.test.ts` → 16 pass | | Full closure (types/engine/cards/shared/typescript-config + glue), 8889 files/~79MB; `oracle/golden/rng-golden-vectors.json` (seedrandom 3.0.5); strict `--vs-upstream` + local-path allowlist; replay/snapshot are format contracts owned by Steps 6/11/13/32/33 |
 | 1 | Port `lorcana-types` schemas | not started | | | | | | |
 | 2 | Port deck-validation rules | not started | | | | | | |
 | 3 | Port static resource and card instance registry | not started | | | | | | |
