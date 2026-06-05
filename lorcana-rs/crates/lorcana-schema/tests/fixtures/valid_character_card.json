@@ -1,0 +1,30 @@
+{
+  "id": "set1-001",
+  "canonicalId": "ci_1",
+  "name": "Elsa",
+  "version": "Ice Queen",
+  "fullName": "Elsa - Ice Queen",
+  "inkType": ["amethyst"],
+  "cost": 6,
+  "inkable": true,
+  "cardType": "character",
+  "strength": 4,
+  "willpower": 6,
+  "lore": 2,
+  "classifications": ["Dreamborn", "Hero", "Queen", "Sorcerer"],
+  "abilities": [
+    { "type": "keyword", "keyword": "Ward", "id": "set1-001-ability-1", "text": "Ward" },
+    {
+      "type": "triggered",
+      "trigger": { "event": "play", "timing": "when", "on": "SELF" },
+      "effect": { "type": "draw", "amount": 2, "target": "CONTROLLER" },
+      "id": "set1-001-ability-2",
+      "text": "When you play this character, draw 2 cards."
+    }
+  ],
+  "text": "Ward (Opponents can't choose this character except to challenge.)",
+  "i18n": { "en": { "name": "Elsa", "version": "Ice Queen" } },
+  "set": "TFC",
+  "cardNumber": 1,
+  "rarity": "legendary"
+}

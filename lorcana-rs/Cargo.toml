@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/lorcana-schema"]
+
+# Shared dependency versions for the headless Lorcana port workspace.
+# Only the crates that the current blueprint step needs are declared here;
+# downstream crates (lorcana-core, lorcana-conformance, lorcana-py,
+# lorcana-cli, lorcana-card-ir) are added as their steps land.
+[workspace.package]
+edition = "2024"
+rust-version = "1.96.0"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+thiserror = "2"

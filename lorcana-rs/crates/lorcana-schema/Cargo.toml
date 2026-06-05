@@ -1,0 +1,21 @@
+[package]
+name = "lorcana-schema"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Serde enums/structs mirroring the frozen @tcg/lorcana-types DSL (blueprint Step 1)."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Tests read the frozen oracle text under ../../../oracle/source to prove the
+# Rust discriminators still match the frozen TypeScript names (anti-drift).

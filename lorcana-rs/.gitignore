@@ -1,0 +1,5 @@
+/target
+
+# Cargo.lock is intentionally committed: this is a deterministic, reproducible
+# engine port (a workspace of binaries + conformance harnesses), so the exact
+# dependency graph must be pinned and reviewable. Do not ignore it.

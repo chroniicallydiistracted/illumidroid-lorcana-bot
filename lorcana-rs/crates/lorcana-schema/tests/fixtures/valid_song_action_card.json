@@ -1,0 +1,22 @@
+{
+  "id": "set1-030",
+  "canonicalId": "ci_30",
+  "name": "Let It Go",
+  "inkType": ["amethyst"],
+  "cost": 5,
+  "inkable": true,
+  "cardType": "action",
+  "actionSubtype": "song",
+  "abilities": [
+    {
+      "type": "action",
+      "effect": { "type": "banish", "target": "CHOSEN_CHARACTER" },
+      "id": "set1-030-ability-1",
+      "text": "Banish chosen character."
+    }
+  ],
+  "i18n": { "en": { "name": "Let It Go" } },
+  "set": "TFC",
+  "cardNumber": 30,
+  "rarity": "rare"
+}
