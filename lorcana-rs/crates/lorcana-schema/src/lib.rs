@@ -33,6 +33,7 @@ pub mod classification;
 pub mod condition;
 pub mod cost;
 pub mod deck;
+pub mod deck_format;
 pub mod effect;
 pub mod error;
 pub mod expressions;
@@ -56,9 +57,12 @@ pub use classification::Classification;
 pub use condition::{Condition, ConditionType};
 pub use cost::{AbilityCost, BoolOrNumber, CardTypeOrSong, CostComponentType};
 pub use deck::{
-    CardFormatData, DeckCard, DeckValidationError, DeckValidationResult, FormatValidationKind,
-    LorcanaFormat, LorcanaFormatId, LorcanaSetCode, MAX_COPIES_PER_CARD, MAX_INK_TYPES,
-    MIN_DECK_SIZE,
+    CardFormatData, DeckCard, DeckFormatResult, DeckValidationError, DeckValidationResult,
+    FormatRuleResult, FormatValidationKind, LorcanaFormat, LorcanaFormatId, LorcanaSetCode,
+    MAX_COPIES_PER_CARD, MAX_INK_TYPES, MIN_DECK_SIZE,
+};
+pub use deck_format::{
+    LORCANA_FORMATS, default_formats, get_deck_formats, validate_deck, validate_deck_for_format,
 };
 pub use effect::{Effect, EffectType};
 pub use error::SchemaError;

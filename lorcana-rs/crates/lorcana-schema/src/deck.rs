@@ -4,13 +4,20 @@
 //! Mirrors `oracle/source/packages/lorcana/lorcana-types/src/cards/deck-validation.ts`
 //! and `.../decks/validate-deck.ts`.
 //!
-//! ## Step boundary (Step 1 vs Step 2)
-//! Per `docs/port/port-status.md`, the deck-validation **rules/algorithm** are
-//! Step 2. Step 1 ports only the shared **constants, types, and error shapes**
-//! that the schema round-trip tests need. The `validateDeck` /
-//! `validateDeckForFormat` / `getDeckFormats` algorithms and the
-//! `LORCANA_FORMATS` data table are intentionally **not** ported here — they
-//! land in Step 2.
+//! ## Module split (Step 1 types vs Step 2 algorithm)
+//! This module owns the deck-validation **constants, types, and error/result
+//! shapes** (`MIN_DECK_SIZE`/`MAX_INK_TYPES`/`MAX_COPIES_PER_CARD`,
+//! `DeckValidationError`, `DeckValidationResult`, `DeckStats`, and the DAC
+//! `LorcanaFormat` / `DeckCard` / `CardFormatData` / `FormatRuleResult` /
+//! `DeckFormatResult` / set/format/kind enums). The DAC format-validation
+//! **algorithm** and the `LORCANA_FORMATS` data table (`validateDeck` /
+//! `validateDeckForFormat` / `getDeckFormats`, ported in Step 2) live in
+//! [`crate::deck_format`].
+//!
+//! `cards/deck-validation.ts` declares `DeckStats` and the standard-rules
+//! `DeckValidationError` shapes but contains **no producing algorithm** in
+//! `lorcana-types`; no such validator/stats computation is invented here (see
+//! the residual-gap note in `port-status.md`).
 
 use crate::card::CardCopyLimit;
 use crate::ink::InkType;
